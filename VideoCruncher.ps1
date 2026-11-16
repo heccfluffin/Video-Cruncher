@@ -377,13 +377,13 @@ function New-Slider($parent, $names) {
 # ---------------- Window ----------------
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Video Cruncher"
-$form.ClientSize = New-Object System.Drawing.Size(620, 640)
+$form.ClientSize = New-Object System.Drawing.Size(620, 668)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 $form.AllowDrop = $true
 $form.Font = New-Object System.Drawing.Font($UIFont, 10)
-$form.BackgroundImage = New-SkyImage 620 640
+$form.BackgroundImage = New-SkyImage 620 668
 $form.BackgroundImageLayout = "None"
 Set-DoubleBuffered $form
 
@@ -398,9 +398,9 @@ $ffLink.Add_LinkClicked({ [void](Select-FFmpeg) })
 $form.Controls.Add($ffLink)
 
 # Mode "pills" instead of plain tabs
-$videoTab = New-Card 20 130 580 370
-$audioTab = New-Card 20 130 580 370
-$gifTab   = New-Card 20 130 580 370
+$videoTab = New-Card 20 130 580 398
+$audioTab = New-Card 20 130 580 398
+$gifTab   = New-Card 20 130 580 398
 $form.Controls.AddRange(@($videoTab, $audioTab, $gifTab))
 $pillVideo = New-GelButton "Video" 24 86 104 36 "Blue" $form
 $pillAudio = New-GelButton "MP3"   134 86 104 36 "Glass" $form
@@ -448,6 +448,9 @@ $vReup = New-Combo $ReupItems 95 282 120 $videoTab
 [void](New-Hint "Re-crunches it again and again, like a meme reposted forever" 230 279 $videoTab)
 [void](New-Hint "(more re-uploads = slower)" 230 297 $videoTab)
 $vSeek = New-Check "Random seeking (skips back and forth through the video)" 0 320 $videoTab
+$vYtp  = New-Check "Auto YTP (random YouTube Poop edits everywhere)" 0 348 $videoTab
+$tooltip0 = New-Object System.Windows.Forms.ToolTip
+$tooltip0.SetToolTip($vYtp, "Stutters, reverses, chipmunk / slow-mo, pitch changes, inverted colours, mirroring, rainbow, zoom, loud bursts and echo - all at random. Set crunch level 1 for YTP with only a little crunch.")
 
 # --- MP3 card ---
 [void](New-Label "Pick an audio file (or a video to rip the sound from)" 0 6 $audioTab)
@@ -492,10 +495,10 @@ $gBottom = New-TextField 100 247 436 $gifTab
 [void](New-Hint "Tip: saving the GIF to your PC first works best - links often fail or grab the wrong GIF." 0 318 $gifTab)
 
 # --- Bottom bar ---
-$go       = New-GelButton "CRUNCH IT"          20 514 170 46 "Green"  $form 12
-$previewB = New-GelButton "Preview (3 sec)"   198 514 140 46 "Blue"   $form 10
-$batchB   = New-GelButton "Crunch a folder"   346 514 150 46 "Aqua"   $form 10
-$randomB  = New-GelButton "Random!"           504 514  96 46 "Orange" $form 10
+$go       = New-GelButton "CRUNCH IT"          20 542 170 46 "Green"  $form 12
+$previewB = New-GelButton "Preview (3 sec)"   198 542 140 46 "Blue"   $form 10
+$batchB   = New-GelButton "Crunch a folder"   346 542 150 46 "Aqua"   $form 10
+$randomB  = New-GelButton "Random!"           504 542  96 46 "Orange" $form 10
 
 $tooltip = New-Object System.Windows.Forms.ToolTip
 $tooltip.SetToolTip($previewB, "Crunch just the first 3 seconds with the current settings and play it")
@@ -503,7 +506,7 @@ $tooltip.SetToolTip($batchB, "Crunch every file in a folder with the current set
 $tooltip.SetToolTip($randomB, "Surprise settings for the current mode")
 
 $progress = New-Object System.Windows.Forms.ProgressBar
-$progress.Location = New-Object System.Drawing.Point(20, 572)
+$progress.Location = New-Object System.Drawing.Point(20, 600)
 $progress.Size = New-Object System.Drawing.Size(580, 18)
 $progress.MarqueeAnimationSpeed = 30
 $form.Controls.Add($progress)
@@ -515,7 +518,7 @@ $status.BackColor = [System.Drawing.Color]::Transparent
 $status.ForeColor = RGB 255 255 255
 $status.Font = New-Object System.Drawing.Font($UIFont, 10, [System.Drawing.FontStyle]::Bold)
 $status.Size = New-Object System.Drawing.Size(580, 24)
-$status.Location = New-Object System.Drawing.Point(20, 600)
+$status.Location = New-Object System.Drawing.Point(20, 628)
 $form.Controls.Add($status)
 
 function Set-Busy($busy) {
@@ -783,7 +786,8 @@ function Build-Video($limit) {
 
     $steps = @()
     # Random seeking: chop the video into short random jumps first (built when it runs, as it needs the video's length)
-    if ($vSeek.Checked) { $steps += @{ Ext = ".mp4"; Seek = $true; Limit = $limit } }
+    if ($vYtp.Checked) { $steps += @{ Ext = ".mp4"; Ytp = $true; Limit = $limit } }
+    elseif ($vSeek.Checked) { $steps += @{ Ext = ".mp4"; Seek = $true; Limit = $limit } }
     if ($vGlitch.Checked) {
         # Glitch: encode with an old codec, corrupt the data, then decode the damage back
         $steps += @{ Ext = ".avi"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -an -vf `"$vfStr`" -c:v mpeg4 -q:v 12 -g 9999 -bsf:v noise=amount=4000 `"{OUT}`"" }
@@ -914,7 +918,10 @@ function Get-MediaInfo($ffmpeg, $file) {
     if ($err -match 'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)') {
         $dur = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [double]::Parse($Matches[3], $Inv)
     }
-    return @{ Duration = $dur; HasAudio = ($err -match 'Stream #.*Audio:') }
+    $w = 640; $h = 360
+    if ($err -match 'Video:.*?\b(\d{2,5})x(\d{2,5})\b') { $w = [int]$Matches[1]; $h = [int]$Matches[2] }
+    if ($err -match 'rotation of (-?\d+)' -and [math]::Abs([int]$Matches[1]) % 180 -eq 90) { $t = $w; $w = $h; $h = $t }  # sideways phone video
+    return @{ Duration = $dur; HasAudio = ($err -match 'Stream #.*Audio:'); Width = $w; Height = $h }
 }
 
 # Random seeking: play a short bit, jump back or forward a few seconds (sometimes anywhere),
@@ -941,6 +948,85 @@ function Build-SeekCommand($ffmpeg, $src, $out, $limit) {
     }
     return "-y -hide_banner $ins-filter_complex `"${fc}concat=n=${n}:v=1:a=0[v]`" -map `"[v]`" " +
            "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p `"$out`""
+}
+
+# Auto YTP: mostly plays forward in short stretches, but keeps throwing in random
+# YouTube Poop edits - stutters, reverses, speed / pitch changes, colour effects, zooms, loud bursts.
+$YtpFx = @(
+    @{ V = "reverse";                     A = "areverse" },
+    @{ V = "setpts=PTS/1.6";              A = "asetrate=70560,aresample=44100" },               # chipmunk fast
+    @{ V = "setpts=PTS/0.6";              A = "asetrate=26460,aresample=44100" },               # slow-mo deep voice
+    @{ V = "negate";                      A = "" },                                             # inverted colours
+    @{ V = "hflip";                       A = "" },                                             # mirrored
+    @{ V = "hue=H=2*PI*t*2:s=3";          A = "" },                                             # rainbow
+    @{ V = "crop=iw/2:ih/2";              A = "" },                                             # zoom in
+    @{ V = "eq=saturation=3:contrast=2";  A = "volume=12,acrusher=bits=6:mix=1" },              # LOUD burst
+    @{ V = "";                            A = "vibrato=f=8:d=1" },                              # wobbly voice
+    @{ V = "";                            A = "aecho=0.8:0.9:120|240:0.6|0.4" },                # echo
+    @{ V = "";                            A = "asetrate=66150,aresample=44100,atempo=0.6667" }, # pitch up
+    @{ V = "";                            A = "asetrate=29106,aresample=44100,atempo=1.5" }     # pitch down
+)
+function Build-YtpCommand($ffmpeg, $src, $out, $limit) {
+    $info = Get-MediaInfo $ffmpeg $src
+    $dur = $info.Duration
+    if ($dur -lt 1) { $script:LastError = "Couldn't read the video's length for Auto YTP."; return $null }
+    $target = if ($limit) { [math]::Min($limit, $dur) } else { $dur }
+    $tw = [int]([math]::Floor([math]::Min($info.Width, 854) / 2) * 2)
+    $th = [int]([math]::Round($info.Height * $tw / $info.Width / 2) * 2)
+    $audio = $info.HasAudio
+    $rnd = New-Object System.Random
+    $script:ytpIns = ""; $script:ytpFc = @(); $script:ytpLabels = ""; $script:ytpN = 0
+
+    function Add-Seg($start, $len, $v, $a) {
+        $i = $script:ytpN
+        $script:ytpIns += "-ss $(Num ([math]::Round($start, 3))) -t $(Num ([math]::Round($len, 3))) -i `"$src`" "
+        $vc = if ($v) { "$v," } else { "" }
+        $script:ytpFc += "[${i}:v:0]${vc}scale=${tw}:${th},setsar=1,fps=30,format=yuv420p[v$i]"
+        if ($audio) {
+            $ac = if ($a) { "$a," } else { "" }
+            $script:ytpFc += "[${i}:a:0]aresample=44100,${ac}aformat=sample_rates=44100:channel_layouts=stereo[a$i]"
+            $script:ytpLabels += "[v$i][a$i]"
+        } else { $script:ytpLabels += "[v$i]" }
+        $script:ytpN++
+    }
+    function Clamp($p, $l) { return [math]::Max(0, [math]::Min($p, $dur - $l)) }
+
+    $pos = 0.0; $total = 0.0
+    while ($total -lt $target -and $script:ytpN -lt 140 -and $script:ytpIns.Length -lt 20000) {
+        $r = $rnd.NextDouble()
+        if ($r -lt 0.45) {
+            # a normal bit, carrying on forward
+            $len = [math]::Min(0.6 + $rnd.NextDouble() * 1.4, $dur - 0.05); $pos = Clamp $pos $len
+            Add-Seg $pos $len "" ""; $pos += $len; $total += $len
+        } elseif ($r -lt 0.62) {
+            # stutter: the same tiny bit over and over (sometimes flashing inverted)
+            $len = 0.07 + $rnd.NextDouble() * 0.15; $pos = Clamp $pos $len
+            $reps = $rnd.Next(3, 9)
+            for ($k = 0; $k -lt $reps; $k++) {
+                $v = if ($k % 2 -eq 1 -and $rnd.NextDouble() -lt 0.4) { "negate" } else { "" }
+                Add-Seg $pos $len $v ""
+            }
+            $total += $len * $reps
+        } else {
+            # an effect (sometimes two at once)
+            $len = [math]::Min(0.3 + $rnd.NextDouble() * 0.9, $dur - 0.05); $pos = Clamp $pos $len
+            $picks = @($YtpFx | Get-Random -Count $(if ($rnd.NextDouble() -lt 0.25) { 2 } else { 1 }))
+            $v = (@($picks | ForEach-Object { $_.V }) | Where-Object { $_ }) -join ","
+            $a = (@($picks | ForEach-Object { $_.A }) | Where-Object { $_ }) -join ","
+            Add-Seg $pos $len $v $a; $total += $len
+            if ($rnd.NextDouble() -lt 0.2) { $pos = $rnd.NextDouble() * $dur }          # jump somewhere random
+            elseif ($rnd.NextDouble() -lt 0.7) { $pos += $len }                        # carry on
+            else { $pos -= 0.5 + $rnd.NextDouble() * 1.5 }                             # rewind a bit
+        }
+    }
+    $n = $script:ytpN
+    $graph = ($script:ytpFc -join ";") + ";" + $script:ytpLabels
+    if ($audio) {
+        return "-y -hide_banner $($script:ytpIns)-filter_complex `"${graph}concat=n=${n}:v=1:a=1[v][a]`" -map `"[v]`" -map `"[a]`" " +
+               "-c:v libx264 -preset veryfast -crf 18 -c:a aac -b:a 192k `"$out`""
+    }
+    return "-y -hide_banner $($script:ytpIns)-filter_complex `"${graph}concat=n=${n}:v=1:a=0[v]`" -map `"[v]`" " +
+           "-c:v libx264 -preset veryfast -crf 18 `"$out`""
 }
 
 # Run one ffmpeg command, keeping the window responsive. Returns $true if it worked.
@@ -971,14 +1057,15 @@ function Invoke-Job($ffmpeg, $job, $src, $out, $label) {
         $last = ($i -eq $steps.Count - 1)
         $stepOut = if ($last) { $out } else { Join-Path $Work "step$i$($steps[$i].Ext)" }
         $status.Text = if ($steps.Count -gt 1) { "$label (step $($i + 1) of $($steps.Count))" } else { $label }
-        if ($steps[$i].Seek) {
-            $cmd = Build-SeekCommand $ffmpeg $src $stepOut $steps[$i].Limit
+        if ($steps[$i].Seek -or $steps[$i].Ytp) {
+            $cmd = if ($steps[$i].Ytp) { Build-YtpCommand $ffmpeg $src $stepOut $steps[$i].Limit }
+                   else { Build-SeekCommand $ffmpeg $src $stepOut $steps[$i].Limit }
             if (-not $cmd) { return $false }
         } else {
             $cmd = $steps[$i].Cmd.Replace("{SRC}", $src).Replace("{IN}", $prev).Replace("{OUT}", $stepOut)
         }
         if (-not (Invoke-FFmpeg $ffmpeg $cmd $stepOut)) { return $false }
-        if ($steps[$i].Seek) { $src = $stepOut }   # the rest of the steps work on the jumbled version
+        if ($steps[$i].Seek -or $steps[$i].Ytp) { $src = $stepOut }   # the rest of the steps work on the jumbled version
         if ($i -gt 0 -and $prev -ne $src) { Remove-Item -LiteralPath $prev -Force -ErrorAction SilentlyContinue }
         $prev = $stepOut
     }
@@ -1106,7 +1193,7 @@ $randomB.Add_Click({
         $earrape.Checked = Roll 0.3; $vBass.Checked = Roll 0.4; $vPitch.Checked = Roll 0.7
         $vSpeed.SelectedIndex   = if (Roll 0.5) { 0 } else { $rng.Next(1, $SpeedItems.Count) }
         $vStretch.SelectedIndex = if (Roll 0.6) { 0 } else { $rng.Next(1, $StretchItems.Count) }
-        $vSeek.Checked = Roll 0.25
+        $vSeek.Checked = Roll 0.25; $vYtp.Checked = Roll 0.2
         $vReup.SelectedIndex    = if (Roll 0.7) { 0 } else { $rng.Next(1, 3) }   # keep random re-uploads quick
     } elseif ($script:Sel -eq $audioTab) {
         $audioSlider.Value = $rng.Next(4, 11)

@@ -28,6 +28,7 @@ The result is saved next to the original as `name_crunched.mp4` / `.mp3` / `.gif
 - **Stretch:** wide, super wide, tall, super tall
 - **Re-uploads:** re-crunches the result 5–50 times, like a meme reposted forever
 - **Random seeking:** skips back and forth through the video at random, like someone frantically scrubbing the timeline
+- **Auto YTP:** random YouTube Poop edits everywhere: stutter loops, reverses, chipmunk / slow-mo, pitch shifts, inverted colours, mirroring, rainbow, zoom, loud bursts and echo. It's different every time.
 - **Save as GIF**
 
 ### MP3
