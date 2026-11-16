@@ -1,0 +1,1095 @@
+param([string]$InputFile = "")
+
+# Video Cruncher - makes .mp4 videos look (and sound) horribly compressed for comedic effect.
+# Needs ffmpeg. If it's not found, the app offers to download it automatically.
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# If anything goes badly wrong, say so instead of silently vanishing
+trap {
+    [System.Windows.Forms.MessageBox]::Show(
+        "Video Cruncher hit an error:`n`n$($_.Exception.Message)`n`nLine $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())`n`nTip: run 'Debug (shows errors).bat' and send a screenshot.",
+        "Video Cruncher", "OK", "Error") | Out-Null
+    exit 1
+}
+
+$AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+$ConfigFile = Join-Path $AppDir "ffmpeg-path.txt"
+
+function Save-FFmpegPath($path) {
+    try { Set-Content -LiteralPath $ConfigFile -Value $path -Encoding UTF8 } catch {}
+}
+
+function Find-FFmpeg {
+    # 1. Remembered from last time
+    if (Test-Path -LiteralPath $ConfigFile) {
+        $saved = (Get-Content -LiteralPath $ConfigFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($saved -and (Test-Path -LiteralPath $saved.Trim())) { return $saved.Trim() }
+    }
+    # 2. Next to this app
+    $local = Join-Path $AppDir "ffmpeg.exe"
+    if (Test-Path $local) { return $local }
+    # 3. On the PATH
+    $cmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+    if ($cmd) { Save-FFmpegPath $cmd.Source; return $cmd.Source }
+
+    # 4. Search the usual install spots
+    $status.Text = "Looking for ffmpeg on your PC..."
+    $progress.Style = "Marquee"
+    $form.Refresh()
+    try {
+        $direct = @(
+            "C:\ffmpeg\bin\ffmpeg.exe", "C:\ffmpeg\ffmpeg.exe",
+            "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffmpeg.exe",
+            "$env:USERPROFILE\scoop\shims\ffmpeg.exe",
+            "$env:ProgramData\chocolatey\bin\ffmpeg.exe"
+        )
+        foreach ($p in $direct) { if (Test-Path -LiteralPath $p) { Save-FFmpegPath $p; return $p } }
+
+        # Folders with "ffmpeg" in the name in common locations
+        $roots = @("C:\", $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA,
+                   "$env:LOCALAPPDATA\Programs", "$env:LOCALAPPDATA\Microsoft\WinGet\Packages",
+                   $env:USERPROFILE, "$env:USERPROFILE\Downloads", "$env:USERPROFILE\Desktop",
+                   "$env:USERPROFILE\Documents", "$env:USERPROFILE\OneDrive\Desktop",
+                   "$env:USERPROFILE\OneDrive\Documents") | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+        foreach ($root in $roots) {
+            [System.Windows.Forms.Application]::DoEvents()
+            $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "*ffmpeg*" -ErrorAction SilentlyContinue
+            foreach ($d in $dirs) {
+                $hit = Get-ChildItem -LiteralPath $d.FullName -Recurse -Depth 4 -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { Save-FFmpegPath $hit.FullName; return $hit.FullName }
+            }
+        }
+
+        # Last resort: a loose ffmpeg.exe sitting in Downloads/Desktop (a few folders deep)
+        foreach ($root in @("$env:USERPROFILE\Downloads", "$env:USERPROFILE\Desktop") | Where-Object { Test-Path -LiteralPath $_ }) {
+            [System.Windows.Forms.Application]::DoEvents()
+            $hit = Get-ChildItem -LiteralPath $root -Recurse -Depth 3 -Filter "ffmpeg.exe" -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if ($hit) { Save-FFmpegPath $hit.FullName; return $hit.FullName }
+        }
+    } finally {
+        $progress.Style = "Blocks"; $progress.Value = 0
+        $status.Text = "Ready."
+    }
+    return $null
+}
+
+function Select-FFmpeg {
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title = "Find ffmpeg.exe"
+    $dlg.Filter = "ffmpeg.exe|ffmpeg.exe|Programs (*.exe)|*.exe"
+    if ($dlg.ShowDialog() -eq "OK") {
+        Save-FFmpegPath $dlg.FileName
+        $status.Text = "Using ffmpeg at $($dlg.FileName)"
+        return $dlg.FileName
+    }
+    return $null
+}
+
+function Install-FFmpeg {
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        "Couldn't find ffmpeg on your PC automatically.`n`n" +
+        "YES  -  Download it now (free, ~100 MB, saved next to this app)`n" +
+        "NO   -  I already have it, let me find ffmpeg.exe myself`n" +
+        "CANCEL  -  Never mind",
+        "ffmpeg needed", "YesNoCancel", "Question")
+    if ($answer -eq "No") { return Select-FFmpeg }
+    if ($answer -ne "Yes") { return $null }
+
+    $status.Text = "Downloading ffmpeg... (this can take a minute)"
+    $progress.Style = "Marquee"
+    $form.Refresh()
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $ProgressPreference = 'SilentlyContinue'
+        $zip = Join-Path $env:TEMP "ffmpeg-cruncher.zip"
+        $extract = Join-Path $env:TEMP "ffmpeg-cruncher"
+        $job = Start-Job -ScriptBlock {
+            param($zip, $extract)
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip -UseBasicParsing
+            if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+            Expand-Archive $zip -DestinationPath $extract -Force
+        } -ArgumentList $zip, $extract
+        $script:CurrentJob = $job
+        while ($job.State -eq 'Running') {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 100
+        }
+        $script:CurrentJob = $null
+        Receive-Job $job -ErrorAction Stop | Out-Null
+        Remove-Job $job
+
+        $exe = Get-ChildItem $extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+        if (-not $exe) { throw "ffmpeg.exe not found in the download." }
+        $dest = Join-Path $AppDir "ffmpeg.exe"
+        Copy-Item $exe.FullName $dest -Force
+        Save-FFmpegPath $dest
+        Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
+        $status.Text = "ffmpeg installed. Ready to crunch."
+        return $dest
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Couldn't download ffmpeg:`n$($_.Exception.Message)`n`nYou can download it manually from https://www.gyan.dev/ffmpeg/builds/ and put ffmpeg.exe next to VideoCruncher.ps1.",
+            "Download failed", "OK", "Error") | Out-Null
+        $status.Text = "ffmpeg missing."
+        return $null
+    } finally {
+        $progress.Style = "Blocks"
+        $progress.Value = 0
+    }
+}
+
+# ---------------- Look and feel (Frutiger Aero) ----------------
+$VideoExts = @(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".3gp")
+$AudioExts = @(".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma", ".opus")
+$Work = Join-Path $env:TEMP "videocruncher-work"
+$Inv = [System.Globalization.CultureInfo]::InvariantCulture
+function Num($x) { return ([double]$x).ToString($Inv) }   # always "1.5", never "1,5"
+
+function RGB($r, $g, $b, $a = 255) { return [System.Drawing.Color]::FromArgb($a, $r, $g, $b) }
+$Ink      = RGB 22 58 94        # dark navy text
+$CardFill = RGB 238 248 255     # frosted glass panel colour
+$UIFont   = "Segoe UI"
+
+function Set-DoubleBuffered($ctl) {
+    $prop = $ctl.GetType().GetProperty("DoubleBuffered", [Reflection.BindingFlags]"Instance,NonPublic")
+    if ($prop) { $prop.SetValue($ctl, $true, $null) }
+}
+
+function New-RoundPath($x, $y, $w, $h, $r) {
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $d = $r * 2
+    $p.AddArc($x, $y, $d, $d, 180, 90)
+    $p.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+    $p.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
+    $p.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+    $p.CloseFigure()
+    return $p
+}
+
+# Shiny "gel" button image: rounded gradient with a glassy highlight on the top half
+function New-GlossImage($w, $h, $top, $bottom, $border) {
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = "AntiAlias"
+    $r = [math]::Min([int]($h / 2), 18)
+    $path = New-RoundPath 0 0 ($w - 1) ($h - 1) $r
+    $rect = New-Object System.Drawing.Rectangle(0, 0, $w, $h)
+    $fill = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $top, $bottom, 90)
+    $g.FillPath($fill, $path)
+    # glassy shine
+    $shineH = [int]($h * 0.5)
+    $shinePath = New-RoundPath 3 2 ($w - 7) $shineH ([math]::Max(2, [math]::Min($r - 3, [int]($shineH / 2))))
+    $shineRect = New-Object System.Drawing.Rectangle(0, 2, $w, ($shineH + 1))
+    $shine = New-Object System.Drawing.Drawing2D.LinearGradientBrush($shineRect, (RGB 255 255 255 200), (RGB 255 255 255 35), 90)
+    $g.FillPath($shine, $shinePath)
+    # soft glow at the bottom
+    $glowRect = New-Object System.Drawing.Rectangle(0, [int]($h * 0.55), $w, [int]($h * 0.45))
+    $glow = New-Object System.Drawing.Drawing2D.LinearGradientBrush($glowRect, (RGB 255 255 255 0), (RGB 255 255 255 90), 90)
+    $g.FillRectangle($glow, (New-Object System.Drawing.Rectangle(4, [int]($h * 0.6), ($w - 8), [int]($h * 0.35))))
+    $pen = New-Object System.Drawing.Pen($border, 1.2)
+    $g.DrawPath($pen, $path)
+    $g.Dispose()
+    return $bmp
+}
+
+$Gloss = @{
+    Green  = @((RGB 140 230 90),  (RGB 40 150 30),  (RGB 30 110 25))
+    Blue   = @((RGB 120 205 250), (RGB 20 120 210), (RGB 15 85 160))
+    Aqua   = @((RGB 140 235 235), (RGB 20 160 180), (RGB 10 115 130))
+    Orange = @((RGB 255 205 110), (RGB 240 120 20), (RGB 185 85 10))
+    Glass  = @((RGB 255 255 255 230), (RGB 200 230 250 230), (RGB 120 170 210))
+}
+
+# A glossy button: normal / hover / pressed images, white bold text
+function New-GelButton($text, $x, $y, $w, $h, $colour, $parent, $fontSize = 11) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text
+    $b.Location = New-Object System.Drawing.Point($x, $y)
+    $b.Size = New-Object System.Drawing.Size($w, $h)
+    $b.FlatStyle = "Flat"
+    $b.FlatAppearance.BorderSize = 0
+    $b.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::Transparent
+    $b.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::Transparent
+    $b.BackColor = [System.Drawing.Color]::Transparent
+    $b.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $b.Font = New-Object System.Drawing.Font($UIFont, $fontSize, [System.Drawing.FontStyle]::Bold)
+    Set-GelColour $b $colour
+    $b.Add_MouseEnter({ $this.BackgroundImage = $this.Tag.Hover })
+    $b.Add_MouseLeave({ $this.BackgroundImage = $this.Tag.Normal })
+    $b.Add_MouseDown({ $this.BackgroundImage = $this.Tag.Down })
+    $b.Add_MouseUp({ $this.BackgroundImage = $this.Tag.Hover })
+    $parent.Controls.Add($b)
+    return $b
+}
+function Set-GelColour($b, $colour) {
+    $c = $Gloss[$colour]
+    $w = $b.Width; $h = $b.Height
+    $light = [System.Windows.Forms.ControlPaint]::Light($c[0], 0.4)
+    $dark  = [System.Windows.Forms.ControlPaint]::Dark($c[1], 0.05)
+    $b.Tag = @{
+        Normal = (New-GlossImage $w $h $c[0] $c[1] $c[2])
+        Hover  = (New-GlossImage $w $h $light $c[1] $c[2])
+        Down   = (New-GlossImage $w $h $dark $c[0] $c[2])
+    }
+    $b.BackgroundImage = $b.Tag.Normal
+    $b.ForeColor = if ($colour -eq "Glass") { $Ink } else { [System.Drawing.Color]::White }
+}
+
+# Sky background: blue-to-white gradient, green hills, floating bubbles, glowing title
+function New-SkyImage($w, $h) {
+    $bmp = New-Object System.Drawing.Bitmap($w, $h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = "AntiAlias"; $g.TextRenderingHint = "AntiAliasGridFit"
+    $sky = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, 0, $w, $h)),
+            (RGB 35 140 225), (RGB 225 245 255), 90)
+    $g.FillRectangle($sky, 0, 0, $w, $h)
+    # sun glow top-right
+    $sunPath = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $sunPath.AddEllipse(($w - 260), -160, 420, 360)
+    $sun = New-Object System.Drawing.Drawing2D.PathGradientBrush($sunPath)
+    $sun.CenterColor = RGB 255 255 255 170
+    $sun.SurroundColors = @((RGB 255 255 255 0))
+    $g.FillPath($sun, $sunPath)
+    # rolling green hills
+    $hill1 = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, ($h - 140), $w, 140)),
+              (RGB 150 225 90), (RGB 50 160 50), 90)
+    $g.FillEllipse($hill1, -200, ($h - 95), ($w * 0.9), 260)
+    $hill2 = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, ($h - 140), $w, 140)),
+              (RGB 170 235 110), (RGB 70 175 60), 90)
+    $g.FillEllipse($hill2, ($w * 0.35), ($h - 75), ($w * 0.95), 240)
+    # bubbles
+    $rnd = New-Object System.Random(7)
+    for ($i = 0; $i -lt 22; $i++) {
+        $d = $rnd.Next(14, 70); $x = $rnd.Next(-20, $w); $y = $rnd.Next(-10, ($h - 60))
+        $bp = New-Object System.Drawing.Drawing2D.GraphicsPath
+        $bp.AddEllipse($x, $y, $d, $d)
+        $bb = New-Object System.Drawing.Drawing2D.PathGradientBrush($bp)
+        $bb.CenterColor = RGB 255 255 255 15
+        $bb.SurroundColors = @((RGB 255 255 255 110))
+        $g.FillPath($bb, $bp)
+        $g.FillEllipse((New-Object System.Drawing.SolidBrush((RGB 255 255 255 170))),
+                       ($x + $d * 0.22), ($y + $d * 0.15), ($d * 0.28), ($d * 0.18))
+        $g.DrawEllipse((New-Object System.Drawing.Pen((RGB 255 255 255 120), 1)), $x, $y, $d, $d)
+    }
+    # title with a soft glow
+    $tf = New-Object System.Drawing.Font("Segoe UI Light", 28)
+    $sf = New-Object System.Drawing.Font($UIFont, 10, [System.Drawing.FontStyle]::Italic)
+    foreach ($o in @(@(-2, 0), @(2, 0), @(0, -2), @(0, 2), @(-1, -1), @(1, 1), @(-1, 1), @(1, -1))) {
+        $g.DrawString("Video Cruncher", $tf, (New-Object System.Drawing.SolidBrush((RGB 255 255 255 70))), (22 + $o[0]), (10 + $o[1]))
+    }
+    $g.DrawString("Video Cruncher", $tf, (New-Object System.Drawing.SolidBrush((RGB 10 70 140))), 22, 10)
+    $g.DrawString("make it crunchy", $sf, (New-Object System.Drawing.SolidBrush((RGB 255 255 255 230))), 27, 58)
+    $g.Dispose()
+    return $bmp
+}
+
+# Frosted glass card: rounded panel with a soft white border
+function New-Card($x, $y, $w, $h) {
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Location = New-Object System.Drawing.Point($x, $y)
+    $p.Size = New-Object System.Drawing.Size($w, $h)
+    $p.BackColor = $CardFill
+    $p.Region = New-Object System.Drawing.Region((New-RoundPath 0 0 $w $h 16))
+    Set-DoubleBuffered $p
+    $p.Add_Paint({
+        $g = $_.Graphics; $g.SmoothingMode = "AntiAlias"
+        $w = $this.Width; $h = $this.Height
+        $top = New-Object System.Drawing.Drawing2D.LinearGradientBrush((New-Object System.Drawing.Rectangle(0, 0, $w, 60)),
+                (RGB 255 255 255 255), $CardFill, 90)
+        $g.FillRectangle($top, 0, 0, $w, 60)
+        $g.DrawPath((New-Object System.Drawing.Pen((RGB 150 200 235), 2)), (New-RoundPath 1 1 ($w - 3) ($h - 3) 15))
+    })
+    $p.AllowDrop = $true
+    $p.Visible = $false
+    return $p
+}
+
+# ---------------- Control helpers (positions are inside the card, with padding) ----------------
+$PadX = 14; $PadY = 12
+function P($x, $y) { return New-Object System.Drawing.Point(($x + $PadX), ($y + $PadY)) }
+function New-Label($text, $x, $y, $parent) {
+    $l = New-Object System.Windows.Forms.Label
+    $l.Text = $text; $l.AutoSize = $true; $l.Location = P $x $y
+    $l.BackColor = [System.Drawing.Color]::Transparent; $l.ForeColor = $Ink
+    $parent.Controls.Add($l); return $l
+}
+function New-Check($text, $x, $y, $parent) {
+    $c = New-Object System.Windows.Forms.CheckBox
+    $c.Text = $text; $c.AutoSize = $true; $c.Location = P $x $y
+    $c.BackColor = [System.Drawing.Color]::Transparent; $c.ForeColor = $Ink
+    $c.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $parent.Controls.Add($c); return $c
+}
+function New-Combo($items, $x, $y, $w, $parent) {
+    $c = New-Object System.Windows.Forms.ComboBox
+    $c.DropDownStyle = "DropDownList"; $c.Location = P $x $y
+    $c.Size = New-Object System.Drawing.Size($w, 26)
+    foreach ($i in $items) { [void]$c.Items.Add($i) }
+    $c.SelectedIndex = 0
+    $parent.Controls.Add($c); return $c
+}
+function New-Hint($text, $x, $y, $parent) {
+    $l = New-Label $text $x $y $parent
+    $l.ForeColor = RGB 70 110 150
+    $l.Font = New-Object System.Drawing.Font($UIFont, 8.5, [System.Drawing.FontStyle]::Italic)
+    return $l
+}
+function New-TextField($x, $y, $w, $parent) {
+    $t = New-Object System.Windows.Forms.TextBox
+    $t.Location = P $x $y; $t.Size = New-Object System.Drawing.Size($w, 26)
+    $parent.Controls.Add($t); return $t
+}
+function New-FilePicker($parent, $filter) {
+    $box = New-TextField 0 30 430 $parent
+    $btn = New-GelButton "Browse..." ($PadX + 440) ($PadY + 27) 96 31 "Glass" $parent 10
+    $btn.Tag.Box = $box; $btn.Tag.Filter = $filter
+    $btn.Add_Click({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = $this.Tag.Filter
+        if ($dlg.ShowDialog() -eq "OK") { $this.Tag.Box.Text = $dlg.FileName }
+    })
+    return $box
+}
+function New-Slider($parent, $names) {
+    $lbl = New-Label "" 0 70 $parent
+    $lbl.Font = New-Object System.Drawing.Font($UIFont, 10, [System.Drawing.FontStyle]::Bold)
+    $sl = New-Object System.Windows.Forms.TrackBar
+    $sl.Minimum = 1; $sl.Maximum = 10; $sl.Value = 7; $sl.TickFrequency = 1
+    $sl.Location = P 0 94
+    $sl.Size = New-Object System.Drawing.Size(536, 45)
+    $sl.BackColor = $CardFill
+    $sl.Tag = @{ Label = $lbl; Names = $names }
+    $sl.Add_ValueChanged({ $this.Tag.Label.Text = "Crunch level: $($this.Value)  -  $($this.Tag.Names[$this.Value])" })
+    $lbl.Text = "Crunch level: $($sl.Value)  -  $($names[$sl.Value])"
+    $parent.Controls.Add($sl)
+    return $sl
+}
+
+# ---------------- Window ----------------
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Video Cruncher"
+$form.ClientSize = New-Object System.Drawing.Size(620, 640)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedSingle"
+$form.MaximizeBox = $false
+$form.AllowDrop = $true
+$form.Font = New-Object System.Drawing.Font($UIFont, 10)
+$form.BackgroundImage = New-SkyImage 620 640
+$form.BackgroundImageLayout = "None"
+Set-DoubleBuffered $form
+
+$ffLink = New-Object System.Windows.Forms.LinkLabel
+$ffLink.Text = "ffmpeg location..."
+$ffLink.AutoSize = $true
+$ffLink.BackColor = [System.Drawing.Color]::Transparent
+$ffLink.LinkColor = RGB 10 70 140
+$ffLink.Font = New-Object System.Drawing.Font($UIFont, 8.5)
+$ffLink.Location = New-Object System.Drawing.Point(500, 24)
+$ffLink.Add_LinkClicked({ [void](Select-FFmpeg) })
+$form.Controls.Add($ffLink)
+
+# Mode "pills" instead of plain tabs
+$videoTab = New-Card 20 130 580 370
+$audioTab = New-Card 20 130 580 370
+$gifTab   = New-Card 20 130 580 370
+$form.Controls.AddRange(@($videoTab, $audioTab, $gifTab))
+$pillVideo = New-GelButton "Video" 24 86 104 36 "Blue" $form
+$pillAudio = New-GelButton "MP3"   134 86 104 36 "Glass" $form
+$pillGif   = New-GelButton "GIF"   244 86 104 36 "Glass" $form
+$script:Sel = $null
+function Select-Tab($tab) {
+    foreach ($pair in @(@($videoTab, $pillVideo), @($audioTab, $pillAudio), @($gifTab, $pillGif))) {
+        $on = ($pair[0] -eq $tab)
+        $pair[0].Visible = $on
+        Set-GelColour $pair[1] $(if ($on) { "Blue" } else { "Glass" })
+    }
+    $script:Sel = $tab
+}
+$pillVideo.Add_Click({ Select-Tab $videoTab })
+$pillAudio.Add_Click({ Select-Tab $audioTab })
+$pillGif.Add_Click({ Select-Tab $gifTab })
+
+# --- Video card ---
+[void](New-Label "Pick a video (or drag one onto this window)" 0 6 $videoTab)
+$videoBox = New-FilePicker $videoTab "Videos|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.3gp|All files|*.*"
+$videoNames = @("", "Slightly potato", "Potato", "Old YouTube", "Sent over WhatsApp 5 times",
+                "Dial-up", "Security camera", "Nokia 3310", "Cursed", "Deep fried", "ATOMIZED")
+$videoSlider = New-Slider $videoTab $videoNames
+$fry      = New-Check "Deep fry colours"       0 145 $videoTab
+$vPixel   = New-Check "Pixelate only (clean)"  182 145 $videoTab
+$vGlitch  = New-Check "Glitch / datamosh"      364 145 $videoTab
+$earrape  = New-Check "Distorted audio (LOUD)" 0 173 $videoTab
+$vBass    = New-Check "Bass boost"             182 173 $videoTab
+$vAsGif   = New-Check "Save as GIF (no sound)" 364 173 $videoTab
+$vAsGif.Add_CheckedChanged({ $earrape.Enabled = -not $vAsGif.Checked; $vBass.Enabled = -not $vAsGif.Checked; $vPitch.Enabled = -not $vAsGif.Checked })
+
+[void](New-Label "Speed:" 0 216 $videoTab)
+$SpeedItems = @("1x (normal)", "0.25x", "0.5x", "0.75x", "1.5x", "2x", "3x")
+$vSpeed = New-Combo $SpeedItems 95 212 120 $videoTab
+$vPitch = New-Check "Change pitch too (chipmunk / deep voice)" 230 214 $videoTab
+$vPitch.Checked = $true
+
+[void](New-Label "Stretch:" 0 251 $videoTab)
+$StretchItems = @("Normal", "Wide", "Super wide", "Tall", "Super tall")
+$vStretch = New-Combo $StretchItems 95 247 120 $videoTab
+
+[void](New-Label "Re-uploads:" 0 286 $videoTab)
+$ReupItems = @("None", "5 times", "10 times", "25 times", "50 times")
+$vReup = New-Combo $ReupItems 95 282 120 $videoTab
+[void](New-Hint "Re-crunches it again and again, like a meme reposted forever" 230 279 $videoTab)
+[void](New-Hint "(more re-uploads = slower)" 230 297 $videoTab)
+
+# --- MP3 card ---
+[void](New-Label "Pick an audio file (or a video to rip the sound from)" 0 6 $audioTab)
+$audioBox = New-FilePicker $audioTab ("Audio and video|*.mp3;*.wav;*.m4a;*.aac;*.ogg;*.flac;*.wma;*.opus;" +
+                                      "*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v|All files|*.*")
+$audioNames = @("", "Slightly crispy", "Old radio", "Bad Bluetooth", "Phone on speaker", "Walkie-talkie",
+                "Discord on 1 bar", "Drive-thru speaker", "Cursed", "Deep fried", "ATOMIZED")
+$audioSlider = New-Slider $audioTab $audioNames
+$aDistort  = New-Check "Crunchy distortion"   0 145 $audioTab
+$aBass     = New-Check "Bass boost"           182 145 $audioTab
+$aPhone    = New-Check "Phone call (tinny)"   364 145 $audioTab
+$aWater    = New-Check "Underwater / muffled" 0 173 $audioTab
+$aSlowed   = New-Check "Slowed + reverb"      182 173 $audioTab
+$aNight    = New-Check "Nightcore"            364 173 $audioTab
+$aBathroom = New-Check "Phone in a bathroom"  0 201 $audioTab
+$aVinyl    = New-Check "Vinyl crackle"        182 201 $audioTab
+$aStatic   = New-Check "Radio static"         364 201 $audioTab
+# Slowed and Nightcore cancel each other out, so only allow one
+$aSlowed.Add_CheckedChanged({ if ($aSlowed.Checked) { $aNight.Checked = $false } })
+$aNight.Add_CheckedChanged({ if ($aNight.Checked) { $aSlowed.Checked = $false } })
+[void](New-Hint "Turn your volume down before playing anything with distortion or bass boost!" 0 245 $audioTab)
+
+# --- GIF card ---
+[void](New-Label "Pick a video or GIF file (or paste a link - see tip below)" 0 6 $gifTab)
+$gifBox = New-FilePicker $gifTab ("Videos and GIFs|*.gif;*.webp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.3gp|" +
+                                  "All files|*.*")
+$gifNames = @("", "Tumblr 2012", "Forum signature", "Reaction GIF", "MySpace page", "Geocities",
+              "Under construction", "16 colours", "Cursed", "Deep fried", "ATOMIZED")
+$gifSlider  = New-Slider $gifTab $gifNames
+$gFry       = New-Check "Deep fry colours"      0 145 $gifTab
+$gDither    = New-Check "Grainy dither"         182 145 $gifTab
+$gBoomerang = New-Check "Boomerang"             364 145 $gifTab
+$gShort     = New-Check "Only first 10 seconds" 0 173 $gifTab
+$gShort.Checked = $true
+$gDither.Checked = $true
+
+[void](New-Label "Top text:" 0 216 $gifTab)
+$gTop = New-TextField 100 212 436 $gifTab
+[void](New-Label "Bottom text:" 0 251 $gifTab)
+$gBottom = New-TextField 100 247 436 $gifTab
+[void](New-Hint "Meme captions in Impact font. Leave blank for none." 100 278 $gifTab)
+[void](New-Hint "Tip: saving the GIF to your PC first works best - links often fail or grab the wrong GIF." 0 318 $gifTab)
+
+# --- Bottom bar ---
+$go       = New-GelButton "CRUNCH IT"          20 514 170 46 "Green"  $form 12
+$previewB = New-GelButton "Preview (3 sec)"   198 514 140 46 "Blue"   $form 10
+$batchB   = New-GelButton "Crunch a folder"   346 514 150 46 "Aqua"   $form 10
+$randomB  = New-GelButton "Random!"           504 514  96 46 "Orange" $form 10
+
+$tooltip = New-Object System.Windows.Forms.ToolTip
+$tooltip.SetToolTip($previewB, "Crunch just the first 3 seconds with the current settings and play it")
+$tooltip.SetToolTip($batchB, "Crunch every file in a folder with the current settings")
+$tooltip.SetToolTip($randomB, "Surprise settings for the current mode")
+
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point(20, 572)
+$progress.Size = New-Object System.Drawing.Size(580, 18)
+$progress.MarqueeAnimationSpeed = 30
+$form.Controls.Add($progress)
+
+$status = New-Object System.Windows.Forms.Label
+$status.Text = "Ready."
+$status.AutoSize = $false
+$status.BackColor = [System.Drawing.Color]::Transparent
+$status.ForeColor = RGB 255 255 255
+$status.Font = New-Object System.Drawing.Font($UIFont, 10, [System.Drawing.FontStyle]::Bold)
+$status.Size = New-Object System.Drawing.Size(580, 24)
+$status.Location = New-Object System.Drawing.Point(20, 600)
+$form.Controls.Add($status)
+
+function Set-Busy($busy) {
+    foreach ($c in @($go, $previewB, $batchB, $randomB, $pillVideo, $pillAudio, $pillGif, $videoTab, $audioTab, $gifTab)) {
+        $c.Enabled = -not $busy
+    }
+    if ($busy) { $progress.Style = "Marquee" } else { $progress.Style = "Blocks"; $progress.Value = 0 }
+}
+
+Select-Tab $videoTab
+
+# Put a file in the right mode: GIFs go to GIF, audio files go to MP3; videos go to
+# whichever of Video / MP3 / GIF you're on.
+function Set-InputFile($path) {
+    if (-not $path) { return }
+    $ext = [System.IO.Path]::GetExtension($path).ToLower()
+    if ($ext -eq ".gif" -or $ext -eq ".webp" -or ($script:Sel -eq $gifTab -and $AudioExts -notcontains $ext)) {
+        $gifBox.Text = $path; Select-Tab $gifTab
+    } elseif ($AudioExts -contains $ext -or $script:Sel -eq $audioTab) {
+        $audioBox.Text = $path; Select-Tab $audioTab
+    } else {
+        $videoBox.Text = $path; Select-Tab $videoTab
+    }
+}
+Set-InputFile $InputFile
+
+# ---------------- Drag and drop ----------------
+$onDragEnter = {
+    if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop) -or
+        $_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::UnicodeText)) { $_.Effect = "Copy" }
+}
+$onDragDrop = {
+    if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
+        $files = $_.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
+        if ($files.Count -gt 0) { Set-InputFile $files[0] }
+    } else {
+        # A link dragged in from the browser goes to GIF mode
+        $text = ([string]$_.Data.GetData([System.Windows.Forms.DataFormats]::UnicodeText)).Trim()
+        if ($text -match '^https?://') { $gifBox.Text = $text; Select-Tab $gifTab }
+    }
+}
+foreach ($c in @($form, $videoTab, $audioTab, $gifTab)) { $c.Add_DragEnter($onDragEnter); $c.Add_DragDrop($onDragDrop) }
+
+# Download a GIF from a link. Works with direct media links (.gif/.mp4/.webm) and with
+# GIF site pages (Klipy, Tenor, Giphy, ...) by finding the animation inside the page.
+function Get-WebGif($url) {
+    $tempDir = Join-Path $env:TEMP "videocruncher-dl"
+    Set-Busy $true
+    $status.Text = "Grabbing the GIF from the link..."
+    try {
+        $job = Start-Job -ArgumentList $url, $tempDir -ScriptBlock {
+            param($url, $tempDir)
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $ProgressPreference = 'SilentlyContinue'
+            $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+            $mediaRx = '\.(gif|mp4|webm|mov|webp)(\?|$)'
+            $headers = @{
+                "Accept"          = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                "Accept-Language" = "en-US,en;q=0.9"
+                "Sec-Fetch-Dest"  = "document"
+                "Sec-Fetch-Mode"  = "navigate"
+                "Sec-Fetch-Site"  = "none"
+                "Upgrade-Insecure-Requests" = "1"
+            }
+            # Download $u to $outFile like a browser would. Tries PowerShell first,
+            # then Windows' built-in curl.exe, which some sites block less.
+            function Get-Url($u, $outFile, $referer) {
+                $h = $headers.Clone()
+                if ($referer) { $h["Referer"] = $referer; $h["Sec-Fetch-Site"] = "cross-site"; $h["Sec-Fetch-Dest"] = "image" }
+                try {
+                    Invoke-WebRequest $u -OutFile $outFile -UseBasicParsing -UserAgent $ua -Headers $h -ErrorAction Stop
+                    return
+                } catch { $firstError = $_.Exception.Message }
+                $curl = Join-Path $env:SystemRoot "System32\curl.exe"
+                if (Test-Path $curl) {
+                    $cargs = @("-sS", "-L", "-f", "--compressed", "-A", $ua, "-o", $outFile)
+                    foreach ($k in $h.Keys) { $cargs += "-H"; $cargs += "${k}: $($h[$k])" }
+                    $cargs += $u
+                    & $curl @cargs 2>$null
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path $outFile)) { return }
+                }
+                throw "The site refused the download ($firstError).`n`nWorkaround: right-click the GIF in your browser, choose 'Copy image address' and paste that link instead - or 'Save image as...' and pick the saved file."
+            }
+
+            # What did we actually get? Check the first bytes rather than trusting the link.
+            function Get-Kind($f) {
+                $b = New-Object byte[] 16
+                $fs = [System.IO.File]::OpenRead($f)
+                try { $n = $fs.Read($b, 0, 16) } finally { $fs.Close() }
+                if ($n -lt 12) { return $null }
+                $a = [Text.Encoding]::ASCII.GetString($b, 0, $n)
+                if ($a.StartsWith("GIF8")) { return ".gif" }
+                if ($a.Substring(4, 4) -eq "ftyp") { return ".mp4" }
+                if ($b[0] -eq 0x1A -and $b[1] -eq 0x45 -and $b[2] -eq 0xDF -and $b[3] -eq 0xA3) { return ".webm" }
+                if ($a.StartsWith("RIFF") -and $a.Substring(8, 4) -eq "WEBP") { return ".webp" }
+                return $null
+            }
+
+            # Find likely animation links inside a web page, best first
+            function Find-Media($html, $pageUrl) {
+                $html = $html -replace '\\/', '/' -replace '\\u002[Ff]', '/' -replace '&amp;', '&'
+                $found = @(); $mainTags = @()
+                # Links inside the page's share tags (og:video, og:image, twitter:...)
+                foreach ($m in [regex]::Matches($html, '<meta[^>]+>')) {
+                    $tag = $m.Value
+                    if ($tag -match '(og:video|og:image|twitter:image|twitter:player:stream)' -and
+                        $tag -match 'content\s*=\s*["'']([^"'']+)["'']') { $found += $Matches[1]; $mainTags += $Matches[1] }
+                }
+                # Any other media links anywhere in the page
+                foreach ($m in [regex]::Matches($html, 'https?://[^"''\s<>()]+?\.(gif|mp4|webm|mov|webp)(\?[^"''\s<>()]*)?(?=["''\s<>()])')) {
+                    $found += $m.Value
+                }
+                # Score them: prefer video (sharper), bigger versions, skip thumbnails
+                $found | Where-Object { $_ -match $mediaRx -and $_ -ne $pageUrl } | Select-Object -Unique | Sort-Object -Descending {
+                    $u = $_.ToLower(); $score = 0
+                    if ($mainTags -contains $_) { $score += 100 }   # the page's main GIF, not a related one
+                    if ($u -match '\.mp4') { $score += 30 } elseif ($u -match '\.webm') { $score += 20 } elseif ($u -match '\.gif') { $score += 10 } elseif ($u -match '\.webp') { $score += 5 }
+                    if ($u -match '(/hd/|hd\.|original|large|/full)') { $score += 5 }
+                    if ($u -match '(/sm/|/xs/|tiny|thumb|preview|small|/nano)') { $score -= 8 }
+                    $score
+                }
+            }
+
+            if (Test-Path $tempDir) { Remove-Item $tempDir -Recurse -Force }
+            New-Item -ItemType Directory -Path $tempDir | Out-Null
+
+            # 1. Download whatever the link points at
+            $first = Join-Path $tempDir "first.bin"
+            Get-Url $url $first $null
+            $kind = Get-Kind $first
+            if ($kind) {
+                $file = Join-Path $tempDir ("download" + $kind)
+                Move-Item $first $file -Force
+                return $file
+            }
+
+            # 2. It was a web page (even if the link ended in .gif, like Tenor's share links):
+            #    look inside it for the real animation and try the best few candidates
+            $html = [System.IO.File]::ReadAllText($first)
+            $candidates = @(Find-Media $html $url) | Select-Object -First 6
+            foreach ($media in $candidates) {
+                $tmp = Join-Path $tempDir "candidate.bin"
+                try { Get-Url $media $tmp $url }
+                catch { try { Get-Url $media $tmp $null } catch { continue } }   # some CDNs dislike a Referer
+                $kind = Get-Kind $tmp
+                if ($kind) {
+                    $file = Join-Path $tempDir ("download" + $kind)
+                    Move-Item $tmp $file -Force
+                    return $file
+                }
+            }
+            throw "Couldn't find the GIF on that page.`n`nWorkaround: right-click the GIF in your browser, choose 'Copy image address' and paste that link instead - or 'Save image as...' and pick the saved file."
+        }
+        $script:CurrentJob = $job
+        while ($job.State -eq 'Running') {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 100
+        }
+        $script:CurrentJob = $null
+        $result = Receive-Job $job -ErrorAction Stop
+        Remove-Job $job
+        return ($result | Select-Object -Last 1)
+    } catch {
+        $status.Text = "Couldn't get the GIF from that link."
+        [System.Windows.Forms.MessageBox]::Show("Couldn't get the GIF from that link:`n`n$($_.Exception.Message)",
+            "Video Cruncher", "OK", "Error") | Out-Null
+        return $null
+    } finally {
+        Set-Busy $false
+    }
+}
+
+# Where to save a crunched GIF that came from a link: your Downloads folder,
+# named after the link (e.g. geometry-dash-flamewall-1_crunched.gif)
+function Get-LinkSavePath($url) {
+    $dl = Join-Path $env:USERPROFILE "Downloads"
+    if (-not (Test-Path $dl)) { $dl = [Environment]::GetFolderPath("Desktop") }
+    $slug = (([Uri]$url).AbsolutePath.TrimEnd('/') -split '/')[-1]
+    $slug = [System.IO.Path]::GetFileNameWithoutExtension($slug) -replace '[^A-Za-z0-9_\-]', '_'
+    if (-not $slug) { $slug = "gif" }
+    return Join-Path $dl "$slug.gif"
+}
+
+function Get-OutputPath($in, $ext) {
+    $dir  = Split-Path -Parent $in
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($in)
+    $out  = Join-Path $dir "${base}_crunched$ext"
+    $n = 2
+    while (Test-Path -LiteralPath $out) { $out = Join-Path $dir "${base}_crunched$n$ext"; $n++ }
+    return $out
+}
+
+function Reset-Work {
+    if (Test-Path $Work) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $Work -Force | Out-Null
+}
+
+# Turn "0.25x" etc. into a number
+function Get-Speed {
+    $txt = [string]$vSpeed.SelectedItem
+    if ($txt -like "1x*") { return 1.0 }
+    return [double]::Parse($txt.TrimEnd('x'), $Inv)
+}
+
+# Path for use inside an ffmpeg filter: forward slashes, escaped colon and quotes
+function FilterPath($p) { return ($p -replace '\\', '/' -replace ':', '\:' -replace "'", "'\''") }
+
+# Each builder returns a list of ffmpeg "steps". A step is a command line with
+# placeholders: {IN} = previous step's output, {SRC} = the original file, {OUT} = this step's output.
+# The last step writes the real output file. $limit = only use the first N seconds (for preview).
+
+function Build-Video($limit) {
+    $level = $videoSlider.Value
+    $t     = ($level - 1) / 9.0
+    $width = [int]([math]::Round((480 - $t * 400) / 2) * 2)    # 480px -> 80px internal resolution
+    $fps   = [int][math]::Round(24 - $t * 18)                  # 24 fps -> 6 fps
+    $vbit  = [int][math]::Round(250 - $t * 240)                # 250 kbps -> 10 kbps
+    $abit  = @(48, 40, 32, 24, 20, 16, 12, 10, 8, 8)[$level - 1]
+    $arate = @(22050, 22050, 16000, 16000, 11025, 11025, 11025, 8000, 8000, 8000)[$level - 1]
+    $speed = Get-Speed
+    $asGif = $vAsGif.Checked
+    $tIn   = if ($limit) { "-t $limit " } else { "" }
+
+    # ---- picture ----
+    $vf = @()
+    if ($speed -ne 1) { $vf += "setpts=PTS/$(Num $speed)" }
+    if ($fry.Checked) { $vf += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
+    $vf += "scale=${width}:-2:flags=area"
+    switch ($vStretch.SelectedIndex) {
+        1 { $vf += "scale=iw*2:ih" }   # Wide
+        2 { $vf += "scale=iw*4:ih" }   # Super wide
+        3 { $vf += "scale=iw:ih*2" }   # Tall
+        4 { $vf += "scale=iw:ih*4" }   # Super tall
+    }
+    if (-not $vPixel.Checked) { $vf += "fps=$fps" }
+    # blow back up with chunky pixels to fit inside 640x640
+    $vf += "scale='trunc(min(640/iw,640/ih)*iw/2)*2':'trunc(min(640/iw,640/ih)*ih/2)*2':flags=neighbor", "format=yuv420p"
+    $vfStr = $vf -join ","
+
+    # ---- sound ----
+    $af = @()
+    if ($speed -ne 1) {
+        if ($vPitch.Checked) {
+            $af += "aresample=44100", "asetrate=$(Num (44100 * $speed))", "aresample=44100"
+        } else {
+            $s = $speed
+            while ($s -lt 0.5) { $af += "atempo=0.5"; $s = $s / 0.5 }
+            while ($s -gt 2.0) { $af += "atempo=2.0"; $s = $s / 2.0 }
+            $af += "atempo=$(Num $s)"
+        }
+    }
+    if ($vBass.Checked)   { $af += "bass=g=18:f=100:w=0.6" }
+    if ($earrape.Checked) { $af += "volume=8", "acrusher=bits=8:mix=1" }
+    $afArgs = if ($af.Count -and -not $asGif) { "-af `"$($af -join ',')`" " } else { "" }
+
+    # ---- encoder settings ----
+    if ($vPixel.Checked) {
+        $venc = "-c:v libx264 -preset veryfast -crf 18 "
+        $aenc = "-c:a aac -b:a 128k "
+    } else {
+        $venc = "-c:v libx264 -preset veryfast -b:v ${vbit}k -maxrate ${vbit}k -bufsize $($vbit * 2)k -x264-params no-deblock=1 "
+        $aenc = "-c:a aac -b:a ${abit}k -ar $arate -ac 1 "
+    }
+    $audioMap = if ($asGif) { "-an " } else { "-map 0:a? $afArgs$aenc" }
+
+    $steps = @()
+    if ($vGlitch.Checked) {
+        # Glitch: encode with an old codec, corrupt the data, then decode the damage back
+        $steps += @{ Ext = ".avi"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -an -vf `"$vfStr`" -c:v mpeg4 -q:v 12 -g 9999 -bsf:v noise=amount=4000 `"{OUT}`"" }
+        $audioMap2 = if ($asGif) { "-an " } else { "-map 1:a? $afArgs$aenc" }
+        $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner -err_detect ignore_err -i `"{IN}`" $tIn-i `"{SRC}`" -map 0:v:0 $audioMap2-vf format=yuv420p $venc-movflags +faststart `"{OUT}`"" }
+    } else {
+        $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -map 0:v:0 $audioMap-vf `"$vfStr`" $venc-movflags +faststart `"{OUT}`"" }
+    }
+
+    # Re-uploads: crunch the result again and again
+    $reups = @(0, 5, 10, 25, 50)[$vReup.SelectedIndex]
+    $reAudio = if ($asGif) { "-an " } else { "-map 0:a? $aenc" }
+    for ($i = 0; $i -lt $reups; $i++) {
+        $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner -i `"{IN}`" -map 0:v:0 $reAudio-vf `"unsharp=3:3:0.3,eq=saturation=1.01:contrast=1.01,format=yuv420p`" $venc`"{OUT}`"" }
+    }
+
+    if ($asGif) {
+        $colors = @(128, 64, 48, 32, 24, 16, 12, 8, 6, 4)[$level - 1]
+        $gfps = [math]::Min($fps, 15)
+        $graph = "fps=$gfps,scale='trunc(min(320/iw,320/ih)*iw/2)*2':'trunc(min(320/iw,320/ih)*ih/2)*2':flags=neighbor," +
+                 "split[a][b];[a]palettegen=max_colors=${colors}:stats_mode=full[p];[b][p]paletteuse=dither=bayer:bayer_scale=3"
+        $steps += @{ Ext = ".gif"; Cmd = "-y -hide_banner -i `"{IN}`" -an -lavfi `"$graph`" -loop 0 `"{OUT}`"" }
+    }
+    return @{ Steps = $steps; Ext = $(if ($asGif) { ".gif" } else { ".mp4" }); Name = $videoNames[$level] }
+}
+
+function Build-Audio($limit) {
+    $level = $audioSlider.Value
+    $abit  = @(64, 48, 40, 32, 24, 16, 16, 8, 8, 8)[$level - 1]
+    $arate = @(22050, 22050, 16000, 16000, 11025, 11025, 8000, 8000, 8000, 8000)[$level - 1]
+    $tIn   = if ($limit) { "-t $limit " } else { "" }
+
+    $chain = @("aresample=44100")
+    if ($aSlowed.Checked)   { $chain += "asetrate=$(Num (44100 * 0.85))", "aresample=44100" }
+    if ($aNight.Checked)    { $chain += "asetrate=$(Num (44100 * 1.25))", "aresample=44100" }
+    if ($aPhone.Checked)    { $chain += "highpass=f=300", "lowpass=f=3400" }
+    if ($aBathroom.Checked) { $chain += "highpass=f=300", "lowpass=f=3400", "aecho=0.8:0.9:40|75|110:0.5|0.35|0.2" }
+    if ($aWater.Checked)    { $chain += "lowpass=f=450", "lowpass=f=450" }
+    if ($aBass.Checked)     { $chain += "bass=g=18:f=100:w=0.6" }
+    if ($aSlowed.Checked)   { $chain += "aecho=0.8:0.85:60|120|240:0.45|0.35|0.25" }   # the "reverb" part
+    if ($aDistort.Checked)  { $chain += "volume=8", "acrusher=bits=8:mix=1" }
+
+    # Background noise layers (mixed in; amix divides by the number of inputs, so pre-boost everything)
+    $extras = @()
+    if ($aVinyl.Checked)  { $extras += "vinyl" }
+    if ($aStatic.Checked) { $extras += "static" }
+    $n = 1 + $extras.Count
+    if ($extras.Count -eq 0) {
+        $graph = "[0:a:0]$($chain -join ',')[out]"
+    } else {
+        if ($aStatic.Checked) { $chain += "highpass=f=400", "lowpass=f=2800" }   # radio sound
+        $chain += "volume=$n"
+        $graph = "[0:a:0]$($chain -join ',')[m]"
+        $labels = "[m]"
+        if ($aVinyl.Checked) {
+            $graph += ";anoisesrc=c=pink:a=$(Num (0.015 * $n)):r=44100[h]"
+            $graph += ";aevalsrc='if(lt(random(0)\,0.0004)\,(random(1)*1.2-0.6)*$n\,0)':s=44100[c]"
+            $labels += "[h][c]"
+        }
+        if ($aStatic.Checked) {
+            $graph += ";anoisesrc=c=white:a=$(Num (0.06 * $n)):r=44100[s]"
+            $labels += "[s]"
+        }
+        $mixCount = ([regex]::Matches($labels, '\[')).Count
+        $graph += ";$labels" + "amix=inputs=${inputs}:duration=first[out]"
+    }
+    $cmd = "-y -hide_banner $tIn-i `"{SRC}`" -filter_complex `"$graph`" -map `"[out]`" " +
+           "-c:a libmp3lame -b:a ${abit}k -ar $arate -ac 1 `"{OUT}`""
+    return @{ Steps = @(@{ Ext = ".mp3"; Cmd = $cmd }); Ext = ".mp3"; Name = $audioNames[$level] }
+}
+
+function Write-CaptionFile($text, $name) {
+    $path = Join-Path $Work $name
+    [System.IO.File]::WriteAllText($path, $text.ToUpper(), (New-Object System.Text.UTF8Encoding($false)))
+    return $path
+}
+
+function Build-Gif($limit) {
+    $level  = $gifSlider.Value
+    $t      = ($level - 1) / 9.0
+    $width  = [int]([math]::Round((320 - $t * 270) / 2) * 2)   # 320px -> 50px internal resolution
+    $fps    = [int][math]::Round(15 - $t * 11)                 # 15 fps -> 4 fps
+    $colors = @(128, 64, 48, 32, 24, 16, 12, 8, 6, 4)[$level - 1]
+    if ($gShort.Checked -and (-not $limit -or $limit -gt 10)) { $limit = 10 }
+    $tIn = if ($limit) { "-t $limit " } else { "" }
+
+    $f = @()
+    if ($gFry.Checked) { $f += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
+    $f += "scale=${width}:-2:flags=area", "fps=$fps", "scale=320:-2:flags=neighbor"
+
+    # Meme captions (drawn after the crunch so they stay readable)
+    $font = Join-Path $env:WINDIR "Fonts\impact.ttf"
+    if (-not (Test-Path $font)) { $font = Join-Path $env:WINDIR "Fonts\arialbd.ttf" }
+    $caps = @(@{ Text = $gTop.Text.Trim(); Y = "h*0.04"; File = "top.txt" },
+              @{ Text = $gBottom.Text.Trim(); Y = "h-text_h-h*0.04"; File = "bottom.txt" })
+    foreach ($c in $caps) {
+        if (-not $c.Text) { continue }
+        $tf = Write-CaptionFile $c.Text $c.File
+        # shrink long captions so they fit across the 320px width
+        $size = [int][math]::Max(10, [math]::Min(36, [math]::Floor(320 * 0.95 / ($c.Text.Length * 0.55))))
+        $f += "drawtext=fontfile='$(FilterPath $font)':textfile='$(FilterPath $tf)':expansion=none:" +
+              "fontcolor=white:borderw=2:bordercolor=black:fontsize=${size}:x=(w-text_w)/2:y=$($c.Y)"
+    }
+    $graph = $f -join ","
+    if ($gBoomerang.Checked) { $graph += ",split[fw][bk];[bk]reverse[rv];[fw][rv]concat=n=2:v=1:a=0" }
+    $dither = if ($gDither.Checked) { "bayer:bayer_scale=3" } else { "none" }
+    $graph += ",split[a][b];[a]palettegen=max_colors=${colors}:stats_mode=full[p];[b][p]paletteuse=dither=$dither"
+
+    $cmd = "-y -hide_banner $tIn-i `"{SRC}`" -an -lavfi `"$graph`" -loop 0 `"{OUT}`""
+    return @{ Steps = @(@{ Ext = ".gif"; Cmd = $cmd }); Ext = ".gif"; Name = $gifNames[$level] }
+}
+
+function Build-Current($limit) {
+    if ($script:Sel -eq $audioTab) { return Build-Audio $limit }
+    if ($script:Sel -eq $gifTab)   { return Build-Gif $limit }
+    return Build-Video $limit
+}
+
+# Run one ffmpeg command, keeping the window responsive. Returns $true if it worked.
+function Invoke-FFmpeg($ffmpeg, $ffArgs, $out) {
+    $errLog = Join-Path $env:TEMP "videocruncher-log.txt"
+    $p = Start-Process -FilePath $ffmpeg -ArgumentList $ffArgs -NoNewWindow -PassThru -RedirectStandardError $errLog
+    $null = $p.Handle   # PowerShell quirk: without this, ExitCode can come back empty
+    $script:CurrentProc = $p
+    $script:CurrentOut = $out
+    while (-not $p.HasExited) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 100
+    }
+    $p.WaitForExit()
+    $script:CurrentProc = $null
+    $exitCode = $p.ExitCode
+    $made = (Test-Path -LiteralPath $out) -and ((Get-Item -LiteralPath $out).Length -gt 0)
+    if ($made -and ($exitCode -eq 0 -or $null -eq $exitCode)) { return $true }
+    $script:LastError = (Get-Content $errLog -Tail 8 -ErrorAction SilentlyContinue) -join "`n"
+    return $false
+}
+
+# Run all the steps of a job from $src to $out. Returns $true if it worked.
+function Invoke-Job($ffmpeg, $job, $src, $out, $label) {
+    $steps = $job.Steps
+    $prev = $src
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        $last = ($i -eq $steps.Count - 1)
+        $stepOut = if ($last) { $out } else { Join-Path $Work "step$i$($steps[$i].Ext)" }
+        $cmd = $steps[$i].Cmd.Replace("{SRC}", $src).Replace("{IN}", $prev).Replace("{OUT}", $stepOut)
+        $status.Text = if ($steps.Count -gt 1) { "$label (step $($i + 1) of $($steps.Count))" } else { $label }
+        if (-not (Invoke-FFmpeg $ffmpeg $cmd $stepOut)) { return $false }
+        if ($i -gt 0 -and $prev -ne $src) { Remove-Item -LiteralPath $prev -Force -ErrorAction SilentlyContinue }
+        $prev = $stepOut
+    }
+    return $true
+}
+
+function Get-FFmpegOrInstall {
+    $ffmpeg = Find-FFmpeg
+    if (-not $ffmpeg) { $ffmpeg = Install-FFmpeg }
+    return $ffmpeg
+}
+
+# Work out the input for the current tab (downloading a GIF link if needed)
+function Get-CurrentInput {
+    $isAudio = ($script:Sel -eq $audioTab)
+    $isGif   = ($script:Sel -eq $gifTab)
+    $box = if ($isAudio) { $audioBox } elseif ($isGif) { $gifBox } else { $videoBox }
+    $in = $box.Text.Trim('"', ' ')
+    if ($isGif -and $in -match '^https?://') {
+        $file = Get-WebGif $in
+        if (-not $file) { return $null }
+        return @{ Src = $file; SavePath = (Get-LinkSavePath $in); FromLink = $true }
+    }
+    if (-not $in -or -not (Test-Path -LiteralPath $in)) {
+        $what = if ($isAudio) { "an audio file" } elseif ($isGif) { "a video or GIF" } else { "a video" }
+        [System.Windows.Forms.MessageBox]::Show("Pick $what first.", "Video Cruncher") | Out-Null
+        return $null
+    }
+    return @{ Src = $in; SavePath = $in; FromLink = $false }
+}
+
+function Show-Failure {
+    $status.Text = "Something went wrong."
+    [System.Windows.Forms.MessageBox]::Show("ffmpeg failed:`n`n$script:LastError", "Video Cruncher", "OK", "Error") | Out-Null
+}
+
+# ---------------- Buttons ----------------
+$go.Add_Click({
+    $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
+    Reset-Work
+    $inp = Get-CurrentInput; if (-not $inp) { return }
+    $job = Build-Current $null
+    $out = Get-OutputPath $inp.SavePath $job.Ext
+    Set-Busy $true
+    try {
+        if (Invoke-Job $ffmpeg $job $inp.Src $out "Crunching... ($($job.Name))") {
+            $before = (Get-Item -LiteralPath $inp.Src).Length
+            $after  = (Get-Item -LiteralPath $out).Length
+            $status.Text = "Done! {0:N1} MB -> {1:N2} MB  ({2})" -f ($before / 1MB), ($after / 1MB), (Split-Path -Leaf $out)
+            Set-Busy $false
+            $open = [System.Windows.Forms.MessageBox]::Show(
+                "Crunched!`n`nSaved as:`n$out`n`nPlay it now?", "Video Cruncher", "YesNo", "Information")
+            if ($open -eq "Yes") { Invoke-Item -LiteralPath $out }
+        } else { Set-Busy $false; Show-Failure }
+    } finally {
+        Set-Busy $false
+        Remove-Item $Work, (Join-Path $env:TEMP "videocruncher-dl") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+})
+
+$previewB.Add_Click({
+    $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
+    Reset-Work
+    $inp = Get-CurrentInput; if (-not $inp) { return }
+    $job = Build-Current 3
+    # Previews go in their own temp folder with a new name each time (the old one may still be open in a player)
+    $pdir = Join-Path $env:TEMP "videocruncher-preview"
+    New-Item -ItemType Directory -Path $pdir -Force | Out-Null
+    Get-ChildItem $pdir -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $out = Join-Path $pdir ("preview_" + (Get-Date -Format "HHmmss") + $job.Ext)
+    Set-Busy $true
+    try {
+        if (Invoke-Job $ffmpeg $job $inp.Src $out "Making a 3 second preview... ($($job.Name))") {
+            $status.Text = "Preview ready - hit CRUNCH IT when you like it."
+            Invoke-Item -LiteralPath $out
+        } else { Set-Busy $false; Show-Failure }
+    } finally { Set-Busy $false }
+})
+
+$batchB.Add_Click({
+    $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = "Pick a folder - every matching file in it gets crunched with the current settings"
+    if ($dlg.ShowDialog() -ne "OK") { return }
+    $folder = $dlg.SelectedPath
+
+    $exts = if ($script:Sel -eq $audioTab) { $AudioExts }
+            elseif ($script:Sel -eq $gifTab) { @(".gif") + $VideoExts }
+            else { $VideoExts }
+    $files = @(Get-ChildItem -LiteralPath $folder -File | Where-Object { $exts -contains $_.Extension.ToLower() })
+    if ($files.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No matching files in that folder.`n`nLooking for: $($exts -join ' ')",
+            "Video Cruncher") | Out-Null
+        return
+    }
+    $outDir = Join-Path $folder "crunched"
+    New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+
+    $ok = 0; $failed = @()
+    Set-Busy $true
+    try {
+        for ($i = 0; $i -lt $files.Count; $i++) {
+            $f = $files[$i]
+            Reset-Work
+            $job = Build-Current $null
+            $out = Get-OutputPath (Join-Path $outDir $f.Name) $job.Ext
+            if (Invoke-Job $ffmpeg $job $f.FullName $out "Batch: file $($i + 1) of $($files.Count) - $($f.Name)") { $ok++ }
+            else { $failed += $f.Name }
+        }
+    } finally { Set-Busy $false; Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $status.Text = "Batch done: $ok of $($files.Count) crunched."
+    $msg = "Crunched $ok of $($files.Count) files.`n`nSaved in:`n$outDir"
+    if ($failed.Count) { $msg += "`n`nThese didn't work:`n" + (($failed | Select-Object -First 10) -join "`n") }
+    $open = [System.Windows.Forms.MessageBox]::Show("$msg`n`nOpen the folder?", "Video Cruncher", "YesNo", "Information")
+    if ($open -eq "Yes") { Invoke-Item -LiteralPath $outDir }
+})
+
+$rng = New-Object System.Random
+function Roll($chance) { return ($rng.NextDouble() -lt $chance) }
+$randomB.Add_Click({
+    if ($script:Sel -eq $videoTab) {
+        $videoSlider.Value = $rng.Next(4, 11)
+        $fry.Checked = Roll 0.4; $vPixel.Checked = Roll 0.15; $vGlitch.Checked = Roll 0.3
+        $earrape.Checked = Roll 0.3; $vBass.Checked = Roll 0.4; $vPitch.Checked = Roll 0.7
+        $vSpeed.SelectedIndex   = if (Roll 0.5) { 0 } else { $rng.Next(1, $SpeedItems.Count) }
+        $vStretch.SelectedIndex = if (Roll 0.6) { 0 } else { $rng.Next(1, $StretchItems.Count) }
+        $vReup.SelectedIndex    = if (Roll 0.7) { 0 } else { $rng.Next(1, 3) }   # keep random re-uploads quick
+    } elseif ($script:Sel -eq $audioTab) {
+        $audioSlider.Value = $rng.Next(4, 11)
+        foreach ($c in @($aDistort, $aBass, $aPhone, $aWater, $aBathroom, $aVinyl, $aStatic)) { $c.Checked = Roll 0.3 }
+        $aSlowed.Checked = $false; $aNight.Checked = $false
+        $r = $rng.NextDouble()
+        if ($r -lt 0.3) { $aSlowed.Checked = $true } elseif ($r -lt 0.6) { $aNight.Checked = $true }
+    } else {
+        $gifSlider.Value = $rng.Next(4, 11)
+        $gFry.Checked = Roll 0.4; $gDither.Checked = Roll 0.6; $gBoomerang.Checked = Roll 0.4
+    }
+    $status.Text = "Randomised! Try Preview to see what you got."
+})
+
+# Closing the window always works, even mid-download or mid-crunch:
+# stop whatever is running, tidy up, and exit.
+$script:CurrentJob = $null
+$script:CurrentProc = $null
+$script:CurrentOut = $null
+$form.Add_FormClosing({
+    $busy = $false
+    if ($script:CurrentJob) {
+        $busy = $true
+        Stop-Job $script:CurrentJob -ErrorAction SilentlyContinue
+        Remove-Job $script:CurrentJob -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $env:TEMP "videocruncher-dl") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($script:CurrentProc -and -not $script:CurrentProc.HasExited) {
+        $busy = $true
+        try { $script:CurrentProc.Kill(); $script:CurrentProc.WaitForExit(3000) } catch {}
+        if ($script:CurrentOut) { Remove-Item -LiteralPath $script:CurrentOut -Force -ErrorAction SilentlyContinue }
+    }
+    Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue
+    if ($busy) { [Environment]::Exit(0) }
+})
+
+[void]$form.ShowDialog()
