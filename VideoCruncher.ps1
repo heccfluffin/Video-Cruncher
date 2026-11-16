@@ -1,8 +1,43 @@
+# If you drag a file onto "Video Cruncher.bat", its path arrives here.
 param([string]$InputFile = "")
 
-# Video Cruncher - makes .mp4 videos look (and sound) horribly compressed for comedic effect.
-# Needs ffmpeg. If it's not found, the app offers to download it automatically.
+# =====================================================================================
+#  VIDEO CRUNCHER
+#  Makes videos, music and GIFs look (and sound) horribly compressed, for comedy.
+#  Built by Claude (Anthropic's AI) in conversation with heccfluffin.
+# =====================================================================================
+#
+#  HOW THIS FILE IS LAID OUT (top to bottom):
+#
+#   1. Finding / downloading ffmpeg ..... ffmpeg is the free program that does all the
+#                                          real video and audio work. This app is just a
+#                                          friendly window that builds ffmpeg commands.
+#   2. Look and feel .................... draws the glossy "Frutiger Aero" style: sky
+#                                          background, bubbles, shiny buttons, glass panels.
+#   3. Control helpers .................. small shortcuts for making labels, checkboxes,
+#                                          dropdowns, sliders, etc.
+#   4. The window ....................... builds the Video / MP3 / GIF panels and buttons.
+#   5. Downloading GIFs from links ...... for the GIF mode's "paste a link" feature.
+#   6. Command builders ................. turn your chosen settings into ffmpeg commands.
+#                                          (This is where all the "crunch" recipes live.)
+#   7. Running ffmpeg ................... runs those commands while keeping the window
+#                                          responsive, one step at a time.
+#   8. Buttons .......................... what CRUNCH IT, Preview, Crunch a folder and
+#                                          Random! actually do when clicked.
+#
+#  HOW A CRUNCH WORKS, IN SHORT:
+#   You pick settings -> a "Build-..." function turns them into one or more ffmpeg
+#   command lines ("steps") -> "Invoke-Job" runs the steps in order, each one feeding
+#   its result into the next -> the last step saves  yourfile_crunched.mp4/.mp3/.gif
+#
+#  A NOTE ON FFMPEG "FILTERS":
+#   Most of the magic is ffmpeg filters, written like  scale=160:-2,fps=6
+#   Each filter does one thing to the picture or sound, and commas chain them together
+#   in order. For example  scale=160:-2  means "shrink to 160 pixels wide, keep the shape",
+#   and  fps=6  means "keep only 6 frames per second". The notes below explain each one.
+# =====================================================================================
 
+# Load Windows' built-in tools for making windows, buttons and drawing graphics.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
@@ -15,14 +50,23 @@ trap {
     exit 1
 }
 
+# =====================================================================================
+#  1. FINDING / DOWNLOADING FFMPEG
+# =====================================================================================
+#
+# The folder this script lives in.
 $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# Once ffmpeg is found, its location is remembered in this little text file,
+# so the app doesn't have to search your whole PC every time.
 $ConfigFile = Join-Path $AppDir "ffmpeg-path.txt"
 
+# Remember where ffmpeg is (writes the path into ffmpeg-path.txt).
 function Save-FFmpegPath($path) {
     try { Set-Content -LiteralPath $ConfigFile -Value $path -Encoding UTF8 } catch {}
 }
 
+# Look for ffmpeg.exe, trying the quickest places first. Returns its path, or nothing.
 function Find-FFmpeg {
     # 1. Remembered from last time
     if (Test-Path -LiteralPath $ConfigFile) {
@@ -79,6 +123,8 @@ function Find-FFmpeg {
     return $null
 }
 
+# Let you point to ffmpeg.exe yourself with a normal "Open file" window.
+# (Used by the "ffmpeg location..." link and the "No" option in the popup.)
 function Select-FFmpeg {
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
     $dlg.Title = "Find ffmpeg.exe"
@@ -91,6 +137,8 @@ function Select-FFmpeg {
     return $null
 }
 
+# Ask whether to download ffmpeg, then download and unzip it next to this app.
+# The download runs as a background "job" so the window doesn't freeze while it happens.
 function Install-FFmpeg {
     $answer = [System.Windows.Forms.MessageBox]::Show(
         "Couldn't find ffmpeg on your PC automatically.`n`n" +
@@ -110,6 +158,7 @@ function Install-FFmpeg {
         $ProgressPreference = 'SilentlyContinue'
         $zip = Join-Path $env:TEMP "ffmpeg-cruncher.zip"
         $extract = Join-Path $env:TEMP "ffmpeg-cruncher"
+        # Everything inside this { } block runs in the background.
         $job = Start-Job -ScriptBlock {
             param($zip, $extract)
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -147,23 +196,36 @@ function Install-FFmpeg {
     }
 }
 
-# ---------------- Look and feel (Frutiger Aero) ----------------
+# =====================================================================================
+#  2. LOOK AND FEEL (glossy Frutiger Aero style)
+#  Plus a few general settings used everywhere.
+# =====================================================================================
+# Which file types count as videos and as audio (used for drag-and-drop and batch mode).
 $VideoExts = @(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".wmv", ".flv", ".3gp")
 $AudioExts = @(".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma", ".opus")
+# A scratch folder for in-between files while a crunch has several steps. Wiped after each crunch.
 $Work = Join-Path $env:TEMP "videocruncher-work"
+# Some countries write decimals as "1,5" instead of "1.5". ffmpeg always needs "1.5",
+# so numbers are always written the "invariant" (international) way using Num below.
 $Inv = [System.Globalization.CultureInfo]::InvariantCulture
 function Num($x) { return ([double]$x).ToString($Inv) }   # always "1.5", never "1,5"
 
+# Shortcut for making a colour from red, green, blue (0-255) and optional transparency.
 function RGB($r, $g, $b, $a = 255) { return [System.Drawing.Color]::FromArgb($a, $r, $g, $b) }
+# The app's main colours.
 $Ink      = RGB 22 58 94        # dark navy text
 $CardFill = RGB 238 248 255     # frosted glass panel colour
 $UIFont   = "Segoe UI"
 
+# Makes a window part draw off-screen first, then show it all at once.
+# Stops flickering when the glossy graphics redraw.
 function Set-DoubleBuffered($ctl) {
     $prop = $ctl.GetType().GetProperty("DoubleBuffered", [Reflection.BindingFlags]"Instance,NonPublic")
     if ($prop) { $prop.SetValue($ctl, $true, $null) }
 }
 
+# Builds the outline of a rectangle with rounded corners (used for buttons and panels).
+# x, y = top-left corner, w/h = width/height, r = how round the corners are.
 function New-RoundPath($x, $y, $w, $h, $r) {
     $p = New-Object System.Drawing.Drawing2D.GraphicsPath
     $d = $r * 2
@@ -176,6 +238,11 @@ function New-RoundPath($x, $y, $w, $h, $r) {
 }
 
 # Shiny "gel" button image: rounded gradient with a glassy highlight on the top half
+# Paints a shiny "gel" button picture:
+#   1. a rounded shape filled with a top-to-bottom colour fade
+#   2. a see-through white shine over the top half (the glassy reflection)
+#   3. a faint glow along the bottom
+#   4. a thin darker outline
 function New-GlossImage($w, $h, $top, $bottom, $border) {
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -201,6 +268,7 @@ function New-GlossImage($w, $h, $top, $bottom, $border) {
     return $bmp
 }
 
+# Colour sets for the shiny buttons: (top colour, bottom colour, outline colour).
 $Gloss = @{
     Green  = @((RGB 140 230 90),  (RGB 40 150 30),  (RGB 30 110 25))
     Blue   = @((RGB 120 205 250), (RGB 20 120 210), (RGB 15 85 160))
@@ -210,6 +278,8 @@ $Gloss = @{
 }
 
 # A glossy button: normal / hover / pressed images, white bold text
+# Makes a glossy button. It swaps between three pictures: normal, lighter when the
+# mouse is over it, and darker while it's being clicked.
 function New-GelButton($text, $x, $y, $w, $h, $colour, $parent, $fontSize = 11) {
     $b = New-Object System.Windows.Forms.Button
     $b.Text = $text
@@ -230,6 +300,8 @@ function New-GelButton($text, $x, $y, $w, $h, $colour, $parent, $fontSize = 11) 
     $parent.Controls.Add($b)
     return $b
 }
+# (Re)paints a glossy button in one of the colour sets above.
+# Used when making a button, and to light up the selected Video / MP3 / GIF button.
 function Set-GelColour($b, $colour) {
     $c = $Gloss[$colour]
     $w = $b.Width; $h = $b.Height
@@ -245,6 +317,8 @@ function Set-GelColour($b, $colour) {
 }
 
 # Sky background: blue-to-white gradient, green hills, floating bubbles, glowing title
+# Paints the window background once, as a picture:
+# blue sky fading to white, a sun glow, two green hills, see-through bubbles, and the title.
 function New-SkyImage($w, $h) {
     $bmp = New-Object System.Drawing.Bitmap($w, $h)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -267,6 +341,7 @@ function New-SkyImage($w, $h) {
               (RGB 170 235 110), (RGB 70 175 60), 90)
     $g.FillEllipse($hill2, ($w * 0.35), ($h - 75), ($w * 0.95), 240)
     # bubbles
+    # The bubbles are "random", but always the same pattern (the 7 fixes the pattern).
     $rnd = New-Object System.Random(7)
     for ($i = 0; $i -lt 22; $i++) {
         $d = $rnd.Next(14, 70); $x = $rnd.Next(-20, $w); $y = $rnd.Next(-10, ($h - 60))
@@ -293,6 +368,9 @@ function New-SkyImage($w, $h) {
 }
 
 # Frosted glass card: rounded panel with a soft white border
+# Makes one of the frosted-glass panels that hold each mode's settings
+# (rounded corners, white fade at the top, light blue border).
+# Each mode (Video / MP3 / GIF) has its own card; only one is shown at a time.
 function New-Card($x, $y, $w, $h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Location = New-Object System.Drawing.Point($x, $y)
@@ -313,15 +391,22 @@ function New-Card($x, $y, $w, $h) {
     return $p
 }
 
-# ---------------- Control helpers (positions are inside the card, with padding) ----------------
+# =====================================================================================
+#  3. CONTROL HELPERS
+#  Shortcuts for making the bits you click on. All positions are measured from the
+#  top-left of the panel, with a little padding added so nothing touches the edge.
+# =====================================================================================
 $PadX = 14; $PadY = 12
+# Turns an (x, y) position into a screen point, adding the padding.
 function P($x, $y) { return New-Object System.Drawing.Point(($x + $PadX), ($y + $PadY)) }
+# Plain text.
 function New-Label($text, $x, $y, $parent) {
     $l = New-Object System.Windows.Forms.Label
     $l.Text = $text; $l.AutoSize = $true; $l.Location = P $x $y
     $l.BackColor = [System.Drawing.Color]::Transparent; $l.ForeColor = $Ink
     $parent.Controls.Add($l); return $l
 }
+# A tick box.
 function New-Check($text, $x, $y, $parent) {
     $c = New-Object System.Windows.Forms.CheckBox
     $c.Text = $text; $c.AutoSize = $true; $c.Location = P $x $y
@@ -329,6 +414,7 @@ function New-Check($text, $x, $y, $parent) {
     $c.Cursor = [System.Windows.Forms.Cursors]::Hand
     $parent.Controls.Add($c); return $c
 }
+# A drop-down list (you can only pick from the list, not type your own).
 function New-Combo($items, $x, $y, $w, $parent) {
     $c = New-Object System.Windows.Forms.ComboBox
     $c.DropDownStyle = "DropDownList"; $c.Location = P $x $y
@@ -337,17 +423,21 @@ function New-Combo($items, $x, $y, $w, $parent) {
     $c.SelectedIndex = 0
     $parent.Controls.Add($c); return $c
 }
+# Small grey italic text for tips.
 function New-Hint($text, $x, $y, $parent) {
     $l = New-Label $text $x $y $parent
     $l.ForeColor = RGB 70 110 150
     $l.Font = New-Object System.Drawing.Font($UIFont, 8.5, [System.Drawing.FontStyle]::Italic)
     return $l
 }
+# A box you can type into.
 function New-TextField($x, $y, $w, $parent) {
     $t = New-Object System.Windows.Forms.TextBox
     $t.Location = P $x $y; $t.Size = New-Object System.Drawing.Size($w, 26)
     $parent.Controls.Add($t); return $t
 }
+# A text box for a file path, plus a "Browse..." button that opens a file picker.
+# $filter decides which file types the picker shows.
 function New-FilePicker($parent, $filter) {
     $box = New-TextField 0 30 430 $parent
     $btn = New-GelButton "Browse..." ($PadX + 440) ($PadY + 27) 96 31 "Glass" $parent 10
@@ -359,6 +449,7 @@ function New-FilePicker($parent, $filter) {
     })
     return $box
 }
+# The "Crunch level" slider (1-10), with a label above it that shows the level's funny name.
 function New-Slider($parent, $names) {
     $lbl = New-Label "" 0 70 $parent
     $lbl.Font = New-Object System.Drawing.Font($UIFont, 10, [System.Drawing.FontStyle]::Bold)
@@ -374,7 +465,10 @@ function New-Slider($parent, $names) {
     return $sl
 }
 
-# ---------------- Window ----------------
+# =====================================================================================
+#  4. THE WINDOW
+#  Builds everything you see: the main window, the three mode panels and the buttons.
+# =====================================================================================
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Video Cruncher"
 $form.ClientSize = New-Object System.Drawing.Size(620, 668)
@@ -387,6 +481,7 @@ $form.BackgroundImage = New-SkyImage 620 668
 $form.BackgroundImageLayout = "None"
 Set-DoubleBuffered $form
 
+# The small "ffmpeg location..." link in the top-right corner.
 $ffLink = New-Object System.Windows.Forms.LinkLabel
 $ffLink.Text = "ffmpeg location..."
 $ffLink.AutoSize = $true
@@ -398,14 +493,18 @@ $ffLink.Add_LinkClicked({ [void](Select-FFmpeg) })
 $form.Controls.Add($ffLink)
 
 # Mode "pills" instead of plain tabs
+# One panel per mode. (They're called "tabs" in the code because they used to be tabs.)
 $videoTab = New-Card 20 130 580 398
 $audioTab = New-Card 20 130 580 398
 $gifTab   = New-Card 20 130 580 398
 $form.Controls.AddRange(@($videoTab, $audioTab, $gifTab))
+# The three glossy buttons at the top that switch between modes.
 $pillVideo = New-GelButton "Video" 24 86 104 36 "Blue" $form
 $pillAudio = New-GelButton "MP3"   134 86 104 36 "Glass" $form
 $pillGif   = New-GelButton "GIF"   244 86 104 36 "Glass" $form
 $script:Sel = $null
+# Show the chosen mode's panel, hide the others, and light up its button in blue.
+# $script:Sel always remembers which mode is showing.
 function Select-Tab($tab) {
     foreach ($pair in @(@($videoTab, $pillVideo), @($audioTab, $pillAudio), @($gifTab, $pillGif))) {
         $on = ($pair[0] -eq $tab)
@@ -418,9 +517,14 @@ $pillVideo.Add_Click({ Select-Tab $videoTab })
 $pillAudio.Add_Click({ Select-Tab $audioTab })
 $pillGif.Add_Click({ Select-Tab $gifTab })
 
+# -------------------------------------------------------------------------------------
+#  VIDEO panel - every setting here is read later by Build-Video
+#  (The numbers after each label are its x and y position on the panel.)
+# -------------------------------------------------------------------------------------
 # --- Video card ---
 [void](New-Label "Pick a video (or drag one onto this window)" 0 6 $videoTab)
 $videoBox = New-FilePicker $videoTab "Videos|*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.3gp|All files|*.*"
+# The funny name shown for each crunch level (the empty "" is level 0, which isn't used).
 $videoNames = @("", "Slightly potato", "Potato", "Old YouTube", "Sent over WhatsApp 5 times",
                 "Dial-up", "Security camera", "Nokia 3310", "Cursed", "Deep fried", "ATOMIZED")
 $videoSlider = New-Slider $videoTab $videoNames
@@ -430,6 +534,7 @@ $vGlitch  = New-Check "Glitch / datamosh"      364 145 $videoTab
 $earrape  = New-Check "Distorted audio (LOUD)" 0 173 $videoTab
 $vBass    = New-Check "Bass boost"             182 173 $videoTab
 $vAsGif   = New-Check "Save as GIF (no sound)" 364 173 $videoTab
+# GIFs have no sound, so the sound options are greyed out while "Save as GIF" is ticked.
 $vAsGif.Add_CheckedChanged({ $earrape.Enabled = -not $vAsGif.Checked; $vBass.Enabled = -not $vAsGif.Checked; $vPitch.Enabled = -not $vAsGif.Checked })
 
 [void](New-Label "Speed:" 0 216 $videoTab)
@@ -452,6 +557,9 @@ $vYtp  = New-Check "Auto YTP (random YouTube Poop edits everywhere)" 0 348 $vide
 $tooltip0 = New-Object System.Windows.Forms.ToolTip
 $tooltip0.SetToolTip($vYtp, "Stutters, reverses, chipmunk / slow-mo, pitch changes, inverted colours, mirroring, rainbow, zoom, loud bursts and echo - all at random. Set crunch level 1 for YTP with only a little crunch.")
 
+# -------------------------------------------------------------------------------------
+#  MP3 panel - every setting here is read later by Build-Audio
+# -------------------------------------------------------------------------------------
 # --- MP3 card ---
 [void](New-Label "Pick an audio file (or a video to rip the sound from)" 0 6 $audioTab)
 $audioBox = New-FilePicker $audioTab ("Audio and video|*.mp3;*.wav;*.m4a;*.aac;*.ogg;*.flac;*.wma;*.opus;" +
@@ -473,6 +581,9 @@ $aSlowed.Add_CheckedChanged({ if ($aSlowed.Checked) { $aNight.Checked = $false }
 $aNight.Add_CheckedChanged({ if ($aNight.Checked) { $aSlowed.Checked = $false } })
 [void](New-Hint "Turn your volume down before playing anything with distortion or bass boost!" 0 245 $audioTab)
 
+# -------------------------------------------------------------------------------------
+#  GIF panel - every setting here is read later by Build-Gif
+# -------------------------------------------------------------------------------------
 # --- GIF card ---
 [void](New-Label "Pick a video or GIF file (or paste a link - see tip below)" 0 6 $gifTab)
 $gifBox = New-FilePicker $gifTab ("Videos and GIFs|*.gif;*.webp;*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.flv;*.3gp|" +
@@ -494,23 +605,31 @@ $gBottom = New-TextField 100 247 436 $gifTab
 [void](New-Hint "Meme captions in Impact font. Leave blank for none." 100 278 $gifTab)
 [void](New-Hint "Tip: saving the GIF to your PC first works best - links often fail or grab the wrong GIF." 0 318 $gifTab)
 
+# -------------------------------------------------------------------------------------
+#  Bottom of the window: the four big buttons, the progress bar and the status line.
+#  (What the buttons actually do is in section 8, near the end of the file.)
+# -------------------------------------------------------------------------------------
 # --- Bottom bar ---
 $go       = New-GelButton "CRUNCH IT"          20 542 170 46 "Green"  $form 12
 $previewB = New-GelButton "Preview (3 sec)"   198 542 140 46 "Blue"   $form 10
 $batchB   = New-GelButton "Crunch a folder"   346 542 150 46 "Aqua"   $form 10
 $randomB  = New-GelButton "Random!"           504 542  96 46 "Orange" $form 10
 
+# Little help bubbles that pop up when you hover over a button.
 $tooltip = New-Object System.Windows.Forms.ToolTip
 $tooltip.SetToolTip($previewB, "Crunch just the first 3 seconds with the current settings and play it")
 $tooltip.SetToolTip($batchB, "Crunch every file in a folder with the current settings")
 $tooltip.SetToolTip($randomB, "Surprise settings for the current mode")
 
+# The progress bar. It just animates while something is running
+# (ffmpeg doesn't tell us how far through it is, so it can't show a percentage).
 $progress = New-Object System.Windows.Forms.ProgressBar
 $progress.Location = New-Object System.Drawing.Point(20, 600)
 $progress.Size = New-Object System.Drawing.Size(580, 18)
 $progress.MarqueeAnimationSpeed = 30
 $form.Controls.Add($progress)
 
+# The status line at the very bottom ("Ready.", "Crunching...", "Done!" etc).
 $status = New-Object System.Windows.Forms.Label
 $status.Text = "Ready."
 $status.AutoSize = $false
@@ -521,6 +640,8 @@ $status.Size = New-Object System.Drawing.Size(580, 24)
 $status.Location = New-Object System.Drawing.Point(20, 628)
 $form.Controls.Add($status)
 
+# While crunching: grey out the buttons (so you can't start two crunches at once)
+# and animate the progress bar. Set-Busy $false turns it all back on.
 function Set-Busy($busy) {
     foreach ($c in @($go, $previewB, $batchB, $randomB, $pillVideo, $pillAudio, $pillGif, $videoTab, $audioTab, $gifTab)) {
         $c.Enabled = -not $busy
@@ -528,8 +649,10 @@ function Set-Busy($busy) {
     if ($busy) { $progress.Style = "Marquee" } else { $progress.Style = "Blocks"; $progress.Value = 0 }
 }
 
+# Start on the Video panel.
 Select-Tab $videoTab
 
+#
 # Put a file in the right mode: GIFs go to GIF, audio files go to MP3; videos go to
 # whichever of Video / MP3 / GIF you're on.
 function Set-InputFile($path) {
@@ -543,13 +666,17 @@ function Set-InputFile($path) {
         $videoBox.Text = $path; Select-Tab $videoTab
     }
 }
+# If a file was dragged onto the .bat file, load it now.
 Set-InputFile $InputFile
 
 # ---------------- Drag and drop ----------------
+# Lets you drop a file (or a link from your browser) anywhere on the window.
+# While something is being dragged over the window: show the "copy" mouse cursor if it's a file or text.
 $onDragEnter = {
     if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop) -or
         $_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::UnicodeText)) { $_.Effect = "Copy" }
 }
+# When it's dropped: send the file to the right mode.
 $onDragDrop = {
     if ($_.Data.GetDataPresent([System.Windows.Forms.DataFormats]::FileDrop)) {
         $files = $_.Data.GetData([System.Windows.Forms.DataFormats]::FileDrop)
@@ -562,6 +689,11 @@ $onDragDrop = {
 }
 foreach ($c in @($form, $videoTab, $audioTab, $gifTab)) { $c.Add_DragEnter($onDragEnter); $c.Add_DragDrop($onDragDrop) }
 
+# =====================================================================================
+#  5. DOWNLOADING GIFS FROM LINKS (GIF mode)
+#  Many sites block this, so it tries hard to look like a normal web browser.
+#  Saving the GIF to your PC first is always more reliable.
+# =====================================================================================
 # Download a GIF from a link. Works with direct media links (.gif/.mp4/.webm) and with
 # GIF site pages (Klipy, Tenor, Giphy, ...) by finding the animation inside the page.
 function Get-WebGif($url) {
@@ -702,6 +834,13 @@ function Get-LinkSavePath($url) {
     return Join-Path $dl "$slug.gif"
 }
 
+# =====================================================================================
+#  6. COMMAND BUILDERS - the crunch recipes
+#  These read your settings and write the ffmpeg commands that do the actual work.
+# =====================================================================================
+#
+# Works out the save name: "myvideo.mp4" -> "myvideo_crunched.mp4".
+# If that already exists, it uses _crunched2, _crunched3, ... so nothing gets overwritten.
 function Get-OutputPath($in, $ext) {
     $dir  = Split-Path -Parent $in
     $base = [System.IO.Path]::GetFileNameWithoutExtension($in)
@@ -711,6 +850,7 @@ function Get-OutputPath($in, $ext) {
     return $out
 }
 
+# Empties the scratch folder before a new crunch.
 function Reset-Work {
     if (Test-Path $Work) { Remove-Item $Work -Recurse -Force -ErrorAction SilentlyContinue }
     New-Item -ItemType Directory -Path $Work -Force | Out-Null
@@ -731,6 +871,9 @@ function FilterPath($p) { return ($p -replace '\\', '/' -replace ':', '\:' -repl
 # The last step writes the real output file. $limit = only use the first N seconds (for preview).
 
 function Build-Video($limit) {
+    # --- Turn the crunch level (1-10) into numbers. ---
+    # $t goes from 0 (level 1) to 1 (level 10), and each setting slides between its
+    # "mild" and "destroyed" value as $t goes up.
     $level = $videoSlider.Value
     $t     = ($level - 1) / 9.0
     $width = [int]([math]::Round((480 - $t * 400) / 2) * 2)    # 480px -> 80px internal resolution
@@ -738,11 +881,20 @@ function Build-Video($limit) {
     $vbit  = [int][math]::Round(250 - $t * 240)                # 250 kbps -> 10 kbps
     $abit  = @(48, 40, 32, 24, 20, 16, 12, 10, 8, 8)[$level - 1]
     $arate = @(22050, 22050, 16000, 16000, 11025, 11025, 11025, 8000, 8000, 8000)[$level - 1]
-    $speed = Get-Speed
-    $asGif = $vAsGif.Checked
-    $tIn   = if ($limit) { "-t $limit " } else { "" }
+    $speed = Get-Speed   # the Speed drop-down as a number, e.g. 0.5
+    $asGif = $vAsGif.Checked   # true if "Save as GIF" is ticked
+    $tIn   = if ($limit) { "-t $limit " } else { "" }   # "-t 3" tells ffmpeg to only read the first 3 seconds (for Preview)
 
-    # ---- picture ----
+    # ---- PICTURE filters, applied in this order ----
+    #   setpts=PTS/2         speeds up (or slows down) the video
+    #   eq=saturation...     deep fry: crazy colours and contrast
+    #   unsharp=...          deep fry: over-sharpen
+    #   noise=...            deep fry: add grain
+    #   scale=WIDTH:-2       shrink it right down (the "-2" keeps the shape)
+    #   scale=iw*2:ih        stretch (iw/ih = the current width/height)
+    #   fps=N                throw away frames for that choppy look
+    #   scale=...neighbor    blow it back up with big blocky pixels, to fit in 640x640
+    #   format=yuv420p       a colour format every video player understands
     $vf = @()
     if ($speed -ne 1) { $vf += "setpts=PTS/$(Num $speed)" }
     if ($fry.Checked) { $vf += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
@@ -758,7 +910,12 @@ function Build-Video($limit) {
     $vf += "scale='trunc(min(640/iw,640/ih)*iw/2)*2':'trunc(min(640/iw,640/ih)*ih/2)*2':flags=neighbor", "format=yuv420p"
     $vfStr = $vf -join ","
 
-    # ---- sound ----
+    # ---- SOUND filters ----
+    #   asetrate + aresample   changes speed AND pitch together (chipmunk / deep voice)
+    #   atempo                 changes speed but keeps the pitch normal (only works in 0.5x-2x
+    #                          jumps, so it's repeated for bigger changes like 0.25x)
+    #   bass=g=18              bass boost (+18 dB around 100 Hz)
+    #   volume=8 + acrusher    way too loud, then crushed into crunchy 8-bit sound
     $af = @()
     if ($speed -ne 1) {
         if ($vPitch.Checked) {
@@ -774,7 +931,13 @@ function Build-Video($limit) {
     if ($earrape.Checked) { $af += "volume=8", "acrusher=bits=8:mix=1" }
     $afArgs = if ($af.Count -and -not $asGif) { "-af `"$($af -join ',')`" " } else { "" }
 
-    # ---- encoder settings ----
+    # ---- ENCODER settings: how the result is compressed (this is where the "crunch" happens) ----
+    #   libx264 -b:v 10k       compress the picture into a tiny number of kilobits per second
+    #   no-deblock=1           turn off the smoothing that normally hides compression blocks,
+    #                          so you see big ugly squares instead of blur
+    #   aac -b:a 8k -ar 8000   squash the sound to a tiny bitrate and phone-call sample rate
+    #   -ac 1                  mono
+    # "Pixelate only" uses high quality instead (crf 18) so it's clean blocky pixels.
     if ($vPixel.Checked) {
         $venc = "-c:v libx264 -preset veryfast -crf 18 "
         $aenc = "-c:a aac -b:a 128k "
@@ -785,10 +948,16 @@ function Build-Video($limit) {
     $audioMap = if ($asGif) { "-an " } else { "-map 0:a? $afArgs$aenc" }
 
     $steps = @()
+    # --- Now list the steps, in order. ---
     # Random seeking: chop the video into short random jumps first (built when it runs, as it needs the video's length)
     if ($vYtp.Checked) { $steps += @{ Ext = ".mp4"; Ytp = $true; Limit = $limit } }
     elseif ($vSeek.Checked) { $steps += @{ Ext = ".mp4"; Seek = $true; Limit = $limit } }
     if ($vGlitch.Checked) {
+        # GLITCH works in 2 steps:
+        #   1. save it with an old video format (mpeg4), with only ONE full picture at the start
+        #      (-g 9999), and randomly damage the data as it's saved (-bsf:v noise)
+        #   2. read the damaged file back, ignoring errors (-err_detect ignore_err). The player
+        #      tries to fill in the broken bits by smearing old pixels around - that's the glitch.
         # Glitch: encode with an old codec, corrupt the data, then decode the damage back
         $steps += @{ Ext = ".avi"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -an -vf `"$vfStr`" -c:v mpeg4 -q:v 12 -g 9999 -bsf:v noise=amount=4000 `"{OUT}`"" }
         $audioMap2 = if ($asGif) { "-an " } else { "-map 1:a? $afArgs$aenc" }
@@ -797,6 +966,8 @@ function Build-Video($limit) {
         $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -map 0:v:0 $audioMap-vf `"$vfStr`" $venc-movflags +faststart `"{OUT}`"" }
     }
 
+    # Each re-upload is one more step: re-compress the last result again with a tiny bit of
+    # extra sharpening and colour boost, so the damage slowly builds up like a reposted meme.
     # Re-uploads: crunch the result again and again
     $reups = @(0, 5, 10, 25, 50)[$vReup.SelectedIndex]
     $reAudio = if ($asGif) { "-an " } else { "-map 0:a? $aenc" }
@@ -816,10 +987,20 @@ function Build-Video($limit) {
 
 function Build-Audio($limit) {
     $level = $audioSlider.Value
+    # How much to squash the sound at each level: bitrate in kbps, and sample rate in Hz
+    # (44100 Hz is CD quality, 8000 Hz is a phone call).
     $abit  = @(64, 48, 40, 32, 24, 16, 16, 8, 8, 8)[$level - 1]
     $arate = @(22050, 22050, 16000, 16000, 11025, 11025, 8000, 8000, 8000, 8000)[$level - 1]
     $tIn   = if ($limit) { "-t $limit " } else { "" }
 
+    # ---- SOUND filters, applied in this order ----
+    #   aresample=44100            first, convert everything to the same sample rate
+    #   asetrate=x0.85 / x1.25     slowed (lower + slower) / nightcore (higher + faster)
+    #   highpass + lowpass         cut the deep and the high sounds = tinny phone speaker
+    #   aecho                      echo (bathroom, and the "reverb" in slowed + reverb)
+    #   lowpass=450 (twice)        cut almost everything but the low rumble = underwater
+    #   bass=g=18                  bass boost
+    #   volume=8 + acrusher        too loud, then crushed to 8-bit = distortion
     $chain = @("aresample=44100")
     if ($aSlowed.Checked)   { $chain += "asetrate=$(Num (44100 * 0.85))", "aresample=44100" }
     if ($aNight.Checked)    { $chain += "asetrate=$(Num (44100 * 1.25))", "aresample=44100" }
@@ -830,6 +1011,11 @@ function Build-Audio($limit) {
     if ($aSlowed.Checked)   { $chain += "aecho=0.8:0.85:60|120|240:0.45|0.35|0.25" }   # the "reverb" part
     if ($aDistort.Checked)  { $chain += "volume=8", "acrusher=bits=8:mix=1" }
 
+    # VINYL CRACKLE and RADIO STATIC are made from scratch and mixed in:
+    #   anoisesrc   generates hiss (pink noise for vinyl, white noise for static)
+    #   aevalsrc    generates random clicks/pops: "if a random number is tiny, make a pop"
+    #   amix        mixes everything together. amix turns each input down (it divides by the
+    #               number of inputs), so everything is turned up by the same amount first.
     # Background noise layers (mixed in; amix divides by the number of inputs, so pre-boost everything)
     $extras = @()
     if ($aVinyl.Checked)  { $extras += "vinyl" }
@@ -859,12 +1045,16 @@ function Build-Audio($limit) {
     return @{ Steps = @(@{ Ext = ".mp3"; Cmd = $cmd }); Ext = ".mp3"; Name = $audioNames[$level] }
 }
 
+# Saves a caption into a small text file (in capitals, meme style) for ffmpeg to read.
+# Reading from a file avoids problems with quotes and symbols in what you typed.
 function Write-CaptionFile($text, $name) {
     $path = Join-Path $Work $name
     [System.IO.File]::WriteAllText($path, $text.ToUpper(), (New-Object System.Text.UTF8Encoding($false)))
     return $path
 }
 
+# GIF recipe. Same idea as video: shrink, drop frames, blow back up - but the main crunch
+# is the number of COLOURS. A GIF can have up to 256 colours; level 10 uses just 4.
 function Build-Gif($limit) {
     $level  = $gifSlider.Value
     $t      = ($level - 1) / 9.0
@@ -878,6 +1068,8 @@ function Build-Gif($limit) {
     if ($gFry.Checked) { $f += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
     $f += "scale=${width}:-2:flags=area", "fps=$fps", "scale=320:-2:flags=neighbor"
 
+    # drawtext writes text on the picture: white, black outline, centred, Impact font.
+    # Long captions get a smaller font so they fit across the GIF.
     # Meme captions (drawn after the crunch so they stay readable)
     $font = Join-Path $env:WINDIR "Fonts\impact.ttf"
     if (-not (Test-Path $font)) { $font = Join-Path $env:WINDIR "Fonts\arialbd.ttf" }
@@ -892,7 +1084,11 @@ function Build-Gif($limit) {
               "fontcolor=white:borderw=2:bordercolor=black:fontsize=${size}:x=(w-text_w)/2:y=$($c.Y)"
     }
     $graph = $f -join ","
+    # BOOMERANG: make a copy, play it backwards (reverse), and stick it on the end (concat).
     if ($gBoomerang.Checked) { $graph += ",split[fw][bk];[bk]reverse[rv];[fw][rv]concat=n=2:v=1:a=0" }
+    # PALETTE: palettegen looks at the whole clip and picks the best few colours,
+    # then paletteuse redraws every frame with only those colours.
+    # "Dither" mixes dots of colour together to fake the missing ones (the grainy retro look).
     $dither = if ($gDither.Checked) { "bayer:bayer_scale=3" } else { "none" }
     $graph += ",split[a][b];[a]palettegen=max_colors=${colors}:stats_mode=full[p];[b][p]paletteuse=dither=$dither"
 
@@ -900,12 +1096,16 @@ function Build-Gif($limit) {
     return @{ Steps = @(@{ Ext = ".gif"; Cmd = $cmd }); Ext = ".gif"; Name = $gifNames[$level] }
 }
 
+# Picks the right recipe for whichever mode is showing.
 function Build-Current($limit) {
     if ($script:Sel -eq $audioTab) { return Build-Audio $limit }
     if ($script:Sel -eq $gifTab)   { return Build-Gif $limit }
     return Build-Video $limit
 }
 
+# (Used by Random seeking and Auto YTP. Asking ffmpeg to open a file without saving
+#  anything makes it print details like "Duration: 00:01:23.45" and "1280x720", which
+#  are read out of its text here.)
 # Ask ffmpeg for a file's length and whether it has sound
 function Get-MediaInfo($ffmpeg, $file) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -918,12 +1118,16 @@ function Get-MediaInfo($ffmpeg, $file) {
     if ($err -match 'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)') {
         $dur = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [double]::Parse($Matches[3], $Inv)
     }
+    # The picture size, e.g. 1280x720. Phone videos filmed sideways are marked as "rotated",
+    # so in that case width and height are swapped.
     $w = 640; $h = 360
     if ($err -match 'Video:.*?\b(\d{2,5})x(\d{2,5})\b') { $w = [int]$Matches[1]; $h = [int]$Matches[2] }
     if ($err -match 'rotation of (-?\d+)' -and [math]::Abs([int]$Matches[1]) % 180 -eq 90) { $t = $w; $w = $h; $h = $t }  # sideways phone video
     return @{ Duration = $dur; HasAudio = ($err -match 'Stream #.*Audio:'); Width = $w; Height = $h }
 }
 
+# (Each jump is opened as its own separate "input" with -ss (start time) and -t (length),
+#  then the concat filter joins them all into one video.)
 # Random seeking: play a short bit, jump back or forward a few seconds (sometimes anywhere),
 # repeat until the result is as long as the original. Each jump is its own input, joined with concat.
 function Build-SeekCommand($ffmpeg, $src, $out, $limit) {
@@ -950,6 +1154,18 @@ function Build-SeekCommand($ffmpeg, $src, $out, $limit) {
            "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p `"$out`""
 }
 
+# (Same trick as random seeking - many short pieces joined with concat - but each piece
+#  can get its own effect. Every piece is resized to exactly the same size and frame rate,
+#  because concat can only join pieces that match.)
+#
+# The list of YTP effects. V = what happens to the picture, A = what happens to the sound.
+#   reverse/areverse    play backwards
+#   setpts=PTS/1.6      1.6x faster        setpts=PTS/0.6   slower
+#   negate              inverted colours   hflip            mirrored
+#   hue=H=2*PI*t*2      colours spin round the rainbow
+#   crop=iw/2:ih/2      zoom into the middle
+#   vibrato             wobbly voice       aecho            echo
+#   asetrate + atempo   higher/lower pitch at normal speed
 # Auto YTP: mostly plays forward in short stretches, but keeps throwing in random
 # YouTube Poop edits - stutters, reverses, speed / pitch changes, colour effects, zooms, loud bursts.
 $YtpFx = @(
@@ -977,6 +1193,7 @@ function Build-YtpCommand($ffmpeg, $src, $out, $limit) {
     $rnd = New-Object System.Random
     $script:ytpIns = ""; $script:ytpFc = @(); $script:ytpLabels = ""; $script:ytpN = 0
 
+    # Adds one piece: start time, length, picture effect, sound effect.
     function Add-Seg($start, $len, $v, $a) {
         $i = $script:ytpN
         $script:ytpIns += "-ss $(Num ([math]::Round($start, 3))) -t $(Num ([math]::Round($len, 3))) -i `"$src`" "
@@ -989,10 +1206,12 @@ function Build-YtpCommand($ffmpeg, $src, $out, $limit) {
         } else { $script:ytpLabels += "[v$i]" }
         $script:ytpN++
     }
+    # Keeps a start time inside the video (so we never try to read past the end).
     function Clamp($p, $l) { return [math]::Max(0, [math]::Min($p, $dur - $l)) }
 
     $pos = 0.0; $total = 0.0
     while ($total -lt $target -and $script:ytpN -lt 140 -and $script:ytpIns.Length -lt 20000) {
+        # Roll the dice each time: 45% normal bit, 17% stutter, 38% effect.
         $r = $rnd.NextDouble()
         if ($r -lt 0.45) {
             # a normal bit, carrying on forward
@@ -1029,13 +1248,18 @@ function Build-YtpCommand($ffmpeg, $src, $out, $limit) {
            "-c:v libx264 -preset veryfast -crf 18 `"$out`""
 }
 
+# =====================================================================================
+#  7. RUNNING FFMPEG
+# =====================================================================================
 # Run one ffmpeg command, keeping the window responsive. Returns $true if it worked.
 function Invoke-FFmpeg($ffmpeg, $ffArgs, $out) {
     $errLog = Join-Path $env:TEMP "videocruncher-log.txt"
+    # Start ffmpeg hidden, sending its messages to a log file (shown if something fails).
     $p = Start-Process -FilePath $ffmpeg -ArgumentList $ffArgs -NoNewWindow -PassThru -RedirectStandardError $errLog
     $null = $p.Handle   # PowerShell quirk: without this, ExitCode can come back empty
     $script:CurrentProc = $p
     $script:CurrentOut = $out
+    # Wait for it to finish, but keep the window alive (DoEvents) so it doesn't freeze.
     while (-not $p.HasExited) {
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 100
@@ -1043,12 +1267,15 @@ function Invoke-FFmpeg($ffmpeg, $ffArgs, $out) {
     $p.WaitForExit()
     $script:CurrentProc = $null
     $exitCode = $p.ExitCode
+    # It worked if ffmpeg says so (exit code 0) and the output file exists and isn't empty.
     $made = (Test-Path -LiteralPath $out) -and ((Get-Item -LiteralPath $out).Length -gt 0)
     if ($made -and ($exitCode -eq 0 -or $null -eq $exitCode)) { return $true }
     $script:LastError = (Get-Content $errLog -Tail 8 -ErrorAction SilentlyContinue) -join "`n"
     return $false
 }
 
+# Steps are chained: step 1 reads your file, step 2 reads step 1's result, and so on.
+# In-between results go in the scratch folder; only the last step saves the real file.
 # Run all the steps of a job from $src to $out. Returns $true if it worked.
 function Invoke-Job($ffmpeg, $job, $src, $out, $label) {
     $steps = $job.Steps
@@ -1072,12 +1299,15 @@ function Invoke-Job($ffmpeg, $job, $src, $out, $label) {
     return $true
 }
 
+# Find ffmpeg, or offer to download it if it can't be found.
 function Get-FFmpegOrInstall {
     $ffmpeg = Find-FFmpeg
     if (-not $ffmpeg) { $ffmpeg = Install-FFmpeg }
     return $ffmpeg
 }
 
+# (Returns the file to read, plus where to save the result. For GIF links, the result
+#  goes in your Downloads folder because there's no original file to save next to.)
 # Work out the input for the current tab (downloading a GIF link if needed)
 function Get-CurrentInput {
     $isAudio = ($script:Sel -eq $audioTab)
@@ -1097,12 +1327,16 @@ function Get-CurrentInput {
     return @{ Src = $in; SavePath = $in; FromLink = $false }
 }
 
+# Show ffmpeg's last few error lines in a popup.
 function Show-Failure {
     $status.Text = "Something went wrong."
     [System.Windows.Forms.MessageBox]::Show("ffmpeg failed:`n`n$script:LastError", "Video Cruncher", "OK", "Error") | Out-Null
 }
 
-# ---------------- Buttons ----------------
+# =====================================================================================
+#  8. BUTTONS - what happens when you click them
+# =====================================================================================
+# CRUNCH IT: crunch the whole file, then offer to play it.
 $go.Add_Click({
     $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
     Reset-Work
@@ -1126,6 +1360,8 @@ $go.Add_Click({
     }
 })
 
+# PREVIEW: same recipe, but only the first 3 seconds, saved to a temporary folder,
+# then played straight away.
 $previewB.Add_Click({
     $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
     Reset-Work
@@ -1145,6 +1381,8 @@ $previewB.Add_Click({
     } finally { Set-Busy $false }
 })
 
+# CRUNCH A FOLDER: run the current recipe on every matching file in a folder,
+# saving the results in a "crunched" folder inside it.
 $batchB.Add_Click({
     $ffmpeg = Get-FFmpegOrInstall; if (-not $ffmpeg) { return }
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1184,6 +1422,8 @@ $batchB.Add_Click({
     if ($open -eq "Yes") { Invoke-Item -LiteralPath $outDir }
 })
 
+# RANDOM!: shuffle the settings of the mode that's showing.
+# Roll 0.4 means "a 40% chance of yes".
 $rng = New-Object System.Random
 function Roll($chance) { return ($rng.NextDouble() -lt $chance) }
 $randomB.Add_Click({
@@ -1208,6 +1448,7 @@ $randomB.Add_Click({
     $status.Text = "Randomised! Try Preview to see what you got."
 })
 
+# -------------------------------------------------------------------------------------
 # Closing the window always works, even mid-download or mid-crunch:
 # stop whatever is running, tidy up, and exit.
 $script:CurrentJob = $null
@@ -1230,4 +1471,5 @@ $form.Add_FormClosing({
     if ($busy) { [Environment]::Exit(0) }
 })
 
+# Finally: show the window. The script waits here until the window is closed.
 [void]$form.ShowDialog()
