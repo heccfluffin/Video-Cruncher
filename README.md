@@ -27,6 +27,7 @@ The result is saved next to the original as `name_crunched.mp4` / `.mp3` / `.gif
 - **Speed:** 0.25x to 3x, with or without the chipmunk / deep-voice pitch change
 - **Stretch:** wide, super wide, tall, super tall
 - **Re-uploads:** re-crunches the result 5–50 times, like a meme reposted forever
+- **Random seeking:** skips back and forth through the video at random, like someone frantically scrubbing the timeline
 - **Save as GIF**
 
 ### MP3

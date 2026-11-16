@@ -447,6 +447,7 @@ $ReupItems = @("None", "5 times", "10 times", "25 times", "50 times")
 $vReup = New-Combo $ReupItems 95 282 120 $videoTab
 [void](New-Hint "Re-crunches it again and again, like a meme reposted forever" 230 279 $videoTab)
 [void](New-Hint "(more re-uploads = slower)" 230 297 $videoTab)
+$vSeek = New-Check "Random seeking (skips back and forth through the video)" 0 320 $videoTab
 
 # --- MP3 card ---
 [void](New-Label "Pick an audio file (or a video to rip the sound from)" 0 6 $audioTab)
@@ -781,6 +782,8 @@ function Build-Video($limit) {
     $audioMap = if ($asGif) { "-an " } else { "-map 0:a? $afArgs$aenc" }
 
     $steps = @()
+    # Random seeking: chop the video into short random jumps first (built when it runs, as it needs the video's length)
+    if ($vSeek.Checked) { $steps += @{ Ext = ".mp4"; Seek = $true; Limit = $limit } }
     if ($vGlitch.Checked) {
         # Glitch: encode with an old codec, corrupt the data, then decode the damage back
         $steps += @{ Ext = ".avi"; Cmd = "-y -hide_banner $tIn-i `"{SRC}`" -an -vf `"$vfStr`" -c:v mpeg4 -q:v 12 -g 9999 -bsf:v noise=amount=4000 `"{OUT}`"" }
@@ -899,6 +902,47 @@ function Build-Current($limit) {
     return Build-Video $limit
 }
 
+# Ask ffmpeg for a file's length and whether it has sound
+function Get-MediaInfo($ffmpeg, $file) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $ffmpeg
+    $psi.Arguments = "-hide_banner -i `"$file`""
+    $psi.UseShellExecute = $false; $psi.RedirectStandardError = $true; $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $err = $p.StandardError.ReadToEnd(); $p.WaitForExit()
+    $dur = 0.0
+    if ($err -match 'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)') {
+        $dur = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [double]::Parse($Matches[3], $Inv)
+    }
+    return @{ Duration = $dur; HasAudio = ($err -match 'Stream #.*Audio:') }
+}
+
+# Random seeking: play a short bit, jump back or forward a few seconds (sometimes anywhere),
+# repeat until the result is as long as the original. Each jump is its own input, joined with concat.
+function Build-SeekCommand($ffmpeg, $src, $out, $limit) {
+    $info = Get-MediaInfo $ffmpeg $src
+    $dur = $info.Duration
+    if ($dur -lt 1) { $script:LastError = "Couldn't read the video's length for random seeking."; return $null }
+    $target = if ($limit) { [math]::Min($limit, $dur) } else { $dur }
+    $rnd = New-Object System.Random
+    $pos = 0.0; $total = 0.0; $ins = ""; $fc = ""; $n = 0
+    while ($total -lt $target -and $n -lt 150 -and $ins.Length -lt 24000) {
+        $len = [math]::Min(0.25 + $rnd.NextDouble() * 1.25, [math]::Max(0.1, $dur - 0.05))
+        $pos = [math]::Max(0, [math]::Min($pos, $dur - $len))
+        $ins += "-ss $(Num ([math]::Round($pos, 3))) -t $(Num ([math]::Round($len, 3))) -i `"$src`" "
+        $fc += $(if ($info.HasAudio) { "[${n}:v:0][${n}:a:0]" } else { "[${n}:v:0]" })
+        $total += $len; $n++
+        if ($rnd.NextDouble() -lt 0.25) { $pos = $rnd.NextDouble() * $dur }        # big random jump
+        else { $pos = $pos + $len + (-3 + $rnd.NextDouble() * 7) }               # skip back or forward a bit
+    }
+    if ($info.HasAudio) {
+        return "-y -hide_banner $ins-filter_complex `"${fc}concat=n=${n}:v=1:a=1[v][a]`" -map `"[v]`" -map `"[a]`" " +
+               "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p -c:a aac -b:a 192k `"$out`""
+    }
+    return "-y -hide_banner $ins-filter_complex `"${fc}concat=n=${n}:v=1:a=0[v]`" -map `"[v]`" " +
+           "-c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p `"$out`""
+}
+
 # Run one ffmpeg command, keeping the window responsive. Returns $true if it worked.
 function Invoke-FFmpeg($ffmpeg, $ffArgs, $out) {
     $errLog = Join-Path $env:TEMP "videocruncher-log.txt"
@@ -926,9 +970,15 @@ function Invoke-Job($ffmpeg, $job, $src, $out, $label) {
     for ($i = 0; $i -lt $steps.Count; $i++) {
         $last = ($i -eq $steps.Count - 1)
         $stepOut = if ($last) { $out } else { Join-Path $Work "step$i$($steps[$i].Ext)" }
-        $cmd = $steps[$i].Cmd.Replace("{SRC}", $src).Replace("{IN}", $prev).Replace("{OUT}", $stepOut)
         $status.Text = if ($steps.Count -gt 1) { "$label (step $($i + 1) of $($steps.Count))" } else { $label }
+        if ($steps[$i].Seek) {
+            $cmd = Build-SeekCommand $ffmpeg $src $stepOut $steps[$i].Limit
+            if (-not $cmd) { return $false }
+        } else {
+            $cmd = $steps[$i].Cmd.Replace("{SRC}", $src).Replace("{IN}", $prev).Replace("{OUT}", $stepOut)
+        }
         if (-not (Invoke-FFmpeg $ffmpeg $cmd $stepOut)) { return $false }
+        if ($steps[$i].Seek) { $src = $stepOut }   # the rest of the steps work on the jumbled version
         if ($i -gt 0 -and $prev -ne $src) { Remove-Item -LiteralPath $prev -Force -ErrorAction SilentlyContinue }
         $prev = $stepOut
     }
@@ -1056,6 +1106,7 @@ $randomB.Add_Click({
         $earrape.Checked = Roll 0.3; $vBass.Checked = Roll 0.4; $vPitch.Checked = Roll 0.7
         $vSpeed.SelectedIndex   = if (Roll 0.5) { 0 } else { $rng.Next(1, $SpeedItems.Count) }
         $vStretch.SelectedIndex = if (Roll 0.6) { 0 } else { $rng.Next(1, $StretchItems.Count) }
+        $vSeek.Checked = Roll 0.25
         $vReup.SelectedIndex    = if (Roll 0.7) { 0 } else { $rng.Next(1, 3) }   # keep random re-uploads quick
     } elseif ($script:Sel -eq $audioTab) {
         $audioSlider.Value = $rng.Next(4, 11)
