@@ -149,39 +149,79 @@ function Install-FFmpeg($skipQuestion = $false) {
     if ($answer -eq "No") { return Select-FFmpeg }
     if ($answer -ne "Yes") { return $null }
 
-    $status.Text = "Downloading ffmpeg... (this can take a minute)"
-    $progress.Style = "Marquee"
+    $status.Text = "Starting the ffmpeg download..."
+    Set-Busy $true                 # grey out the buttons while downloading
     $form.Refresh()
 
+    # The background download writes how far it's got into this little text file
+    # ("bytes-done total-bytes", or "unzip" once it's unzipping), and the window reads it
+    # ten times a second to move the progress bar.
+    $progFile = Join-Path $env:TEMP "ffmpeg-cruncher-progress.txt"
+    Remove-Item $progFile -Force -ErrorAction SilentlyContinue
+
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
         $zip = Join-Path $env:TEMP "ffmpeg-cruncher.zip"
         $extract = Join-Path $env:TEMP "ffmpeg-cruncher"
         # Everything inside this { } block runs in the background.
         $job = Start-Job -ScriptBlock {
-            param($zip, $extract)
+            param($zip, $extract, $progFile)
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $ProgressPreference = 'SilentlyContinue'
-            Invoke-WebRequest "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile $zip -UseBasicParsing
+            # Download the file piece by piece (256 KB at a time) so we can count the bytes
+            $req = [System.Net.HttpWebRequest]::Create("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip")
+            $req.UserAgent = "VideoCruncher"
+            $resp = $req.GetResponse()
+            $total = $resp.ContentLength          # -1 if the server doesn't say how big it is
+            $in = $resp.GetResponseStream()
+            $out = [System.IO.File]::Create($zip)
+            $buf = New-Object byte[] 262144
+            $done = 0; $lastWrite = [DateTime]::MinValue
+            try {
+                while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                    $out.Write($buf, 0, $n); $done += $n
+                    if (([DateTime]::Now - $lastWrite).TotalMilliseconds -gt 150) {
+                        [System.IO.File]::WriteAllText($progFile, "$done $total")
+                        $lastWrite = [DateTime]::Now
+                    }
+                }
+            } finally { $out.Close(); $in.Close(); $resp.Close() }
+            [System.IO.File]::WriteAllText($progFile, "unzip")
             if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
             Expand-Archive $zip -DestinationPath $extract -Force
-        } -ArgumentList $zip, $extract
+        } -ArgumentList $zip, $extract, $progFile
         $script:CurrentJob = $job
+
+        # While it runs: read the progress file and update the bar and the status line
+        $progress.Style = "Blocks"; $progress.Minimum = 0; $progress.Maximum = 100; $progress.Value = 0
         while ($job.State -eq 'Running') {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 100
+            $txt = $(try { [System.IO.File]::ReadAllText($progFile) } catch { "" })   # may be mid-write; just try again next time
+            if ($txt -eq "unzip") {
+                $progress.Style = "Marquee"
+                $status.Text = "Unzipping ffmpeg... (nearly done)"
+            } elseif ($txt -match '^(\d+) (-?\d+)$') {
+                $doneMB = [double]$Matches[1] / 1MB; $totalBytes = [double]$Matches[2]
+                if ($totalBytes -gt 0) {
+                    $pct = [int][math]::Min(100, [double]$Matches[1] * 100 / $totalBytes)
+                    $progress.Value = $pct
+                    $status.Text = "Downloading ffmpeg...  {0:N1} of {1:N1} MB  ({2}%)" -f $doneMB, ($totalBytes / 1MB), $pct
+                } else {
+                    $progress.Style = "Marquee"   # size unknown: just animate
+                    $status.Text = "Downloading ffmpeg...  {0:N1} MB so far" -f $doneMB
+                }
+            }
         }
         $script:CurrentJob = $null
         Receive-Job $job -ErrorAction Stop | Out-Null
         Remove-Job $job
 
+        # Find ffmpeg.exe inside the unzipped folder and copy it next to this app
         $exe = Get-ChildItem $extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1
         if (-not $exe) { throw "ffmpeg.exe not found in the download." }
         $dest = Join-Path $AppDir "ffmpeg.exe"
         Copy-Item $exe.FullName $dest -Force
         Save-FFmpegPath $dest
-        Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $zip, $extract, $progFile -Recurse -Force -ErrorAction SilentlyContinue
         $status.Text = "ffmpeg installed. Ready to crunch."
         return $dest
     } catch {
@@ -191,8 +231,7 @@ function Install-FFmpeg($skipQuestion = $false) {
         $status.Text = "ffmpeg missing."
         return $null
     } finally {
-        $progress.Style = "Blocks"
-        $progress.Value = 0
+        Set-Busy $false            # buttons back on, progress bar back to empty
     }
 }
 
@@ -1473,7 +1512,10 @@ $form.Add_FormClosing({
         $busy = $true
         Stop-Job $script:CurrentJob -ErrorAction SilentlyContinue
         Remove-Job $script:CurrentJob -Force -ErrorAction SilentlyContinue
-        Remove-Item (Join-Path $env:TEMP "videocruncher-dl") -Recurse -Force -ErrorAction SilentlyContinue
+        # tidy up half-finished downloads (GIF links, or ffmpeg itself)
+        foreach ($leftover in @("videocruncher-dl", "ffmpeg-cruncher.zip", "ffmpeg-cruncher", "ffmpeg-cruncher-progress.txt")) {
+            Remove-Item (Join-Path $env:TEMP $leftover) -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     if ($script:CurrentProc -and -not $script:CurrentProc.HasExited) {
         $busy = $true
