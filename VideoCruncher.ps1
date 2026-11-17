@@ -139,13 +139,13 @@ function Select-FFmpeg {
 
 # Ask whether to download ffmpeg, then download and unzip it next to this app.
 # The download runs as a background "job" so the window doesn't freeze while it happens.
-function Install-FFmpeg {
-    $answer = [System.Windows.Forms.MessageBox]::Show(
+function Install-FFmpeg($skipQuestion = $false) {
+    $answer = if ($skipQuestion) { "Yes" } else { [System.Windows.Forms.MessageBox]::Show(
         "Couldn't find ffmpeg on your PC automatically.`n`n" +
         "YES  -  Download it now (free, ~100 MB, saved next to this app)`n" +
         "NO   -  I already have it, let me find ffmpeg.exe myself`n" +
         "CANCEL  -  Never mind",
-        "ffmpeg needed", "YesNoCancel", "Question")
+        "ffmpeg needed", "YesNoCancel", "Question") }
     if ($answer -eq "No") { return Select-FFmpeg }
     if ($answer -ne "Yes") { return $null }
 
@@ -886,8 +886,10 @@ function Build-Video($limit) {
     $tIn   = if ($limit) { "-t $limit " } else { "" }   # "-t 3" tells ffmpeg to only read the first 3 seconds (for Preview)
 
     # ---- PICTURE filters, applied in this order ----
+#   (Only filters that come with EVERY version of ffmpeg are used. Some cut-down ffmpeg
+#    builds leave out a few, like "eq", which caused "No such filter" errors before.)
     #   setpts=PTS/2         speeds up (or slows down) the video
-    #   eq=saturation...     deep fry: crazy colours and contrast
+    #   hue=s + curves       deep fry: crazy colours (saturation) and harsh contrast
     #   unsharp=...          deep fry: over-sharpen
     #   noise=...            deep fry: add grain
     #   scale=WIDTH:-2       shrink it right down (the "-2" keeps the shape)
@@ -897,7 +899,7 @@ function Build-Video($limit) {
     #   format=yuv420p       a colour format every video player understands
     $vf = @()
     if ($speed -ne 1) { $vf += "setpts=PTS/$(Num $speed)" }
-    if ($fry.Checked) { $vf += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
+    if ($fry.Checked) { $vf += "hue=s=2.5", "curves=preset=strong_contrast", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
     $vf += "scale=${width}:-2:flags=area"
     switch ($vStretch.SelectedIndex) {
         1 { $vf += "scale=iw*2:ih" }   # Wide
@@ -972,7 +974,7 @@ function Build-Video($limit) {
     $reups = @(0, 5, 10, 25, 50)[$vReup.SelectedIndex]
     $reAudio = if ($asGif) { "-an " } else { "-map 0:a? $aenc" }
     for ($i = 0; $i -lt $reups; $i++) {
-        $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner -i `"{IN}`" -map 0:v:0 $reAudio-vf `"unsharp=3:3:0.3,eq=saturation=1.01:contrast=1.01,format=yuv420p`" $venc`"{OUT}`"" }
+        $steps += @{ Ext = ".mp4"; Cmd = "-y -hide_banner -i `"{IN}`" -map 0:v:0 $reAudio-vf `"unsharp=3:3:0.3,hue=s=1.02,format=yuv420p`" $venc`"{OUT}`"" }
     }
 
     if ($asGif) {
@@ -1065,7 +1067,7 @@ function Build-Gif($limit) {
     $tIn = if ($limit) { "-t $limit " } else { "" }
 
     $f = @()
-    if ($gFry.Checked) { $f += "eq=saturation=2.5:contrast=1.5", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
+    if ($gFry.Checked) { $f += "hue=s=2.5", "curves=preset=strong_contrast", "unsharp=5:5:2.0", "noise=alls=20:allf=t" }
     $f += "scale=${width}:-2:flags=area", "fps=$fps", "scale=320:-2:flags=neighbor"
 
     # drawtext writes text on the picture: white, black outline, centred, Impact font.
@@ -1176,7 +1178,7 @@ $YtpFx = @(
     @{ V = "hflip";                       A = "" },                                             # mirrored
     @{ V = "hue=H=2*PI*t*2:s=3";          A = "" },                                             # rainbow
     @{ V = "crop=iw/2:ih/2";              A = "" },                                             # zoom in
-    @{ V = "eq=saturation=3:contrast=2";  A = "volume=12,acrusher=bits=6:mix=1" },              # LOUD burst
+    @{ V = "hue=s=3,curves=preset=strong_contrast";  A = "volume=12,acrusher=bits=6:mix=1" },              # LOUD burst
     @{ V = "";                            A = "vibrato=f=8:d=1" },                              # wobbly voice
     @{ V = "";                            A = "aecho=0.8:0.9:120|240:0.6|0.4" },                # echo
     @{ V = "";                            A = "asetrate=66150,aresample=44100,atempo=0.6667" }, # pitch up
@@ -1330,6 +1332,17 @@ function Get-CurrentInput {
 # Show ffmpeg's last few error lines in a popup.
 function Show-Failure {
     $status.Text = "Something went wrong."
+    # A cut-down ffmpeg that's missing a feature: offer to get the full version instead
+    if ($script:LastError -match "No such filter|Filter not found|Unknown encoder|Encoder not found|not compiled|Unrecognized option") {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "The ffmpeg on your PC is a cut-down version that's missing a feature this needs:`n`n$script:LastError`n`n" +
+            "Download the full ffmpeg for Video Cruncher now? (free, ~100 MB, saved next to this app - your other ffmpeg isn't touched)",
+            "Video Cruncher", "YesNo", "Warning")
+        if ($answer -eq "Yes" -and (Install-FFmpeg $true)) {
+            [System.Windows.Forms.MessageBox]::Show("Done! Hit CRUNCH IT again.", "Video Cruncher") | Out-Null
+        }
+        return
+    }
     [System.Windows.Forms.MessageBox]::Show("ffmpeg failed:`n`n$script:LastError", "Video Cruncher", "OK", "Error") | Out-Null
 }
 
